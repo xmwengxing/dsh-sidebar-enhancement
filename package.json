@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-enhancement",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "Enhanced Sidebar files panel: rename, create, upload, delete, plus an editable document renderer with save.",
   "license": "MIT",
@@ -21,7 +21,8 @@
     "plugin",
     "sidebar",
     "file-tree",
-    "editor"
+    "editor",
+    "terminal"
   ],
   "exports": {
     ".": "./index.js",
@@ -50,7 +51,10 @@
         "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-sidebar-files",
-        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview",
+        "@deepseek-ai/dsh-api-terminal-controller",
+        "@deepseek-ai/dsh-client-ui-theme",
+        "@deepseek-ai/dsh-client-ui-sidebar-terminal"
       ]
     }
   }

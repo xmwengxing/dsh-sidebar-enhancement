@@ -35,6 +35,15 @@ window.__ModuleLoader__.load({
     /** The editable renderer's implementation identity. */
     const EDITOR_ID = "dsh-sidebar-enhancement/editor";
 
+    /** The built-in terminal tab whose body this package can re-seat below the composer. */
+    const TERMINAL_ID = "@deepseek-ai/dsh-client-ui-sidebar-terminal";
+    /** The terminal package's lazy chunk that owns xterm and `TerminalBody`. */
+    const TERMINAL_CHUNK = "client.terminal.js";
+    /** The composer-dock entry identity (`conversation.composer.dock` is a list slot). */
+    const DOCK_ID = "dsh-sidebar-enhancement/terminal-dock";
+    /** localStorage key persisting the dock mode and height. */
+    const DOCK_STORE_KEY = "dsh-sidebar-enhancement.terminalDock";
+
     /** Host mutation routes registered by this bundle's host half. */
     const ROUTES = {
       save: "/sidebar-enhancer/save",
@@ -345,6 +354,268 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
+    //#region terminal dock: state store, chunk loader, hook bindings
+
+    /**
+     * Dock state shared by the sidebar shadow body and the composer dock, so
+     * exactly one side mounts the terminal at any time. `mode` picks the seat;
+     * `height` is the docked height in pixels.
+     */
+    const dockStore = {
+      mode: "right",
+      height: 300,
+      listeners: new Set(),
+      restore() {
+        try {
+          const raw = window.localStorage.getItem(DOCK_STORE_KEY);
+          if (typeof raw === "string" && raw !== "") {
+            const saved = JSON.parse(raw);
+            if (saved?.mode === "bottom" || saved?.mode === "right") this.mode = saved.mode;
+            if (typeof saved?.height === "number" && Number.isFinite(saved.height)) this.height = saved.height;
+          }
+        } catch {
+          // Private-browsing or corrupt state: keep the defaults.
+        }
+      },
+      persist() {
+        try {
+          window.localStorage.setItem(DOCK_STORE_KEY, JSON.stringify({ mode: this.mode, height: this.height }));
+        } catch {
+          // Storage unavailable: the choice lives for this page only.
+        }
+      },
+      setMode(mode) {
+        if (this.mode === mode) return;
+        this.mode = mode;
+        this.persist();
+        for (const listener of this.listeners) listener();
+      },
+      setHeight(height) {
+        const clamped = Math.max(160, Math.min(Math.round(window.innerHeight * 0.7), Math.round(height)));
+        if (this.height === clamped) return;
+        this.height = clamped;
+        this.persist();
+        for (const listener of this.listeners) listener();
+      },
+      subscribe(listener) {
+        this.listeners.add(listener);
+        return () => {
+          this.listeners.delete(listener);
+        };
+      },
+    };
+    if (typeof window !== "undefined") dockStore.restore();
+
+    /**
+     * Dock diagnostics: the sidebar placeholder surfaces these so a failed
+     * registration or a crashed dock render is visible without devtools.
+     */
+    const dockProbe = { registered: false, error: "", renderError: "", lastBlock: "", terminalTabCount: -1, mounted: false };
+    /** The sidebar-side session id, reported by the shadow body (authoritative for tabDomain/webTerminals). */
+    const dockSession = { sidebarSessionId: undefined };
+
+    /** Stable subscription binding for React external stores. */
+    const subscribeDock = (listener) => dockStore.subscribe(listener);
+
+    /** Reactive `dockStore.mode` for components. */
+    function useDockMode() {
+      return React.useSyncExternalStore(subscribeDock, () => dockStore.mode);
+    }
+
+    /** Reactive `dockStore.height` (px) for the docked pane. */
+    function useDockHeight() {
+      return React.useSyncExternalStore(subscribeDock, () => dockStore.height);
+    }
+
+    /**
+     * Load the terminal package's lazy chunk (`TerminalBody` + bundled xterm)
+     * without opening a terminal tab. The chunk registers its factory under
+     * `<owner>/client.terminal.js` via `__ModuleLoader__.load`; when it has not
+     * run yet, replicate the loader's own chunk-URL rule from the boot graph
+     * row and execute it with a classic script — the same transport the module
+     * system uses, and idempotent through the factory-duplicate guard.
+     */
+    let terminalChunkPromise = undefined;
+    function ensureTerminalChunk(require) {
+      if (terminalChunkPromise !== undefined) return terminalChunkPromise;
+      terminalChunkPromise = (async () => {
+        const chunkId = `${TERMINAL_ID}/${TERMINAL_CHUNK}`;
+        try {
+          return require(chunkId);
+        } catch {
+          // Not registered yet — load it below.
+        }
+        const boot = typeof window === "undefined" ? undefined : window.__DSH_BOOT__;
+        const row = boot !== undefined && Array.isArray(boot.entries) ? boot.entries.find((entry) => entry?.id === TERMINAL_ID) : undefined;
+        if (row === undefined || typeof row.url !== "string") {
+          throw new Error("terminal dock: no boot-graph row for the terminal package");
+        }
+        const resourceStart = row.url.indexOf("/??");
+        const revisionStart = resourceStart < 0 ? -1 : row.url.indexOf("&rev=", resourceStart + 3);
+        if (resourceStart < 0 || revisionStart < 0 || row.url.slice(resourceStart + 3, revisionStart) !== `${TERMINAL_ID}/client.js`) {
+          throw new Error(`terminal dock: unrecognized bundle URL ${row.url}`);
+        }
+        const src = `${row.url.slice(0, resourceStart)}/${TERMINAL_ID}/${TERMINAL_CHUNK}?${row.url.slice(revisionStart + 1)}`;
+        await new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.async = true;
+          script.src = src;
+          script.addEventListener("load", () => {
+            script.remove();
+            resolve();
+          }, { once: true });
+          script.addEventListener("error", () => {
+            script.remove();
+            reject(new Error(`terminal dock: chunk script failed to load`));
+          }, { once: true });
+          document.head.append(script);
+        });
+        return require(chunkId);
+      })();
+      terminalChunkPromise.catch(() => {
+        terminalChunkPromise = undefined; // allow a retry after a failure
+      });
+      return terminalChunkPromise;
+    }
+
+    /** Absent observable: `getSnapshot` yields `undefined`, subscriptions are no-ops. */
+    const absentSource = { getSnapshot: () => undefined, subscribe: () => () => {} };
+    const identity = (value) => value;
+
+    /**
+     * Bind a bare observable to a selector hook (the renderer's
+     * `bindSnapshotSelector` semantics: subscribe/getSnapshot captured once,
+     * selector memoized on `Object.is`, optional equality).
+     */
+    const selectorHookCache = new WeakMap();
+    function selectorHookFor(source) {
+      let hook = selectorHookCache.get(source);
+      if (hook !== undefined) return hook;
+      const subscribe = (listener) => source.subscribe(listener);
+      const getSnapshot = () => source.getSnapshot();
+      hook = function useSelector(selector, isEqual) {
+        const select = selector === undefined ? identity : selector;
+        const memoized = React.useMemo(() => {
+          let hasMemo = false;
+          let memoSnapshot;
+          let memoSelection;
+          return (nextSnapshot) => {
+            if (!hasMemo) {
+              hasMemo = true;
+              memoSnapshot = nextSnapshot;
+              memoSelection = select(nextSnapshot);
+              return memoSelection;
+            }
+            if (Object.is(memoSnapshot, nextSnapshot)) return memoSelection;
+            const nextSelection = select(nextSnapshot);
+            if (isEqual !== undefined && isEqual(memoSelection, nextSelection)) {
+              memoSnapshot = nextSnapshot;
+              return memoSelection;
+            }
+            memoSnapshot = nextSnapshot;
+            memoSelection = nextSelection;
+            return memoSelection;
+          };
+        }, [select, isEqual]);
+        return React.useSyncExternalStore(subscribe, () => memoized(getSnapshot()));
+      };
+      selectorHookCache.set(source, hook);
+      return hook;
+    }
+
+    /**
+     * Bind a keyed observable family (`(key) => observable`) to a hook. The
+     * family may return `undefined` (absent key) — that binds the absent source
+     * without changing hook order, exactly like the renderer's keyed hook.
+     */
+    function keyedSelectorHookFor(family) {
+      return function useKeyed(keyOrSelector, selector, isEqual) {
+        const key = typeof keyOrSelector === "string" ? keyOrSelector : undefined;
+        const select = typeof keyOrSelector === "string" ? selector : keyOrSelector;
+        const equal = typeof keyOrSelector === "string" ? isEqual : selector;
+        let source;
+        if (key === undefined) {
+          source = absentSource;
+        } else {
+          try {
+            source = family(key) ?? absentSource;
+          } catch {
+            source = absentSource;
+          }
+        }
+        return selectorHookFor(source)(select, equal);
+      };
+    }
+
+    /**
+     * Terminal model plumbing, copied from the built-in registration: resolve
+     * the sidebar occurrence for (session, tab key), then ask the terminal
+     * controller for its retained view. Guards turn a vanished occurrence into
+     * an absent view instead of a render-time throw.
+     */
+    function makeTerminalHelpers(ctx, sessionId) {
+      const occurrenceOf = (key) => ctx.sidebarRight.tabDomain.occurrence(sessionId, { id: key });
+      const paramsOf = (key) => {
+        try {
+          return occurrenceOf(key).navigation.getSnapshot().params;
+        } catch {
+          return undefined;
+        }
+      };
+      const terminalIdOf = (key) => {
+        const params = paramsOf(key);
+        return params !== undefined && "terminalId" in params ? params.terminalId : undefined;
+      };
+      const view = (key) => {
+        try {
+          const occurrence = occurrenceOf(key);
+          const params = occurrence.navigation.getSnapshot().params;
+          const contentId = occurrence.navigation.getSnapshot().address;
+          return ctx.webTerminals.view(
+            sessionId,
+            key,
+            contentId,
+            terminalIdOf(key),
+            params !== undefined && "shellPath" in params ? params.shellPath : undefined,
+          );
+        } catch {
+          return absentView;
+        }
+      };
+      const stateHook = keyedSelectorHookFor((key) => {
+        try {
+          return view(key).state;
+        } catch {
+          return undefined;
+        }
+      });
+      return { view, stateHook, paramsOf };
+    }
+
+    /** A inert stand-in `TerminalView` used while an occurrence is vanishing. */
+    const absentView = {
+      state: absentSource,
+      mount: () => () => {},
+      refresh: () => Promise.resolve(),
+      connect: () => {},
+      acknowledge: () => {},
+      write: () => {},
+      resize: () => {},
+      rename: () => Promise.resolve(),
+      close: () => Promise.resolve(),
+      dispose: () => Promise.resolve(),
+    };
+
+    /** The theme observable the built-in body expects as its `hooks.theme`. */
+    function themeSourceFor(ctx) {
+      return {
+        getSnapshot: () => ctx.theme.getTheme(),
+        subscribe: (listener) => ctx.on("theme/change", listener),
+      };
+    }
+
+    //#endregion
+
     //#region styles
 
     const STYLE_ID = "dsh-sidebar-enhancement/client.css";
@@ -403,6 +674,18 @@ window.__ModuleLoader__.load({
 .dse-edNote>span{flex:1;min-width:0;word-break:break-word}
 .dse-edLoading{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;padding:8px 14px}
 .dse-edText{flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box;resize:vertical;border:0;outline:0;background:transparent;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px;line-height:1.6;padding:10px 14px;tab-size:2}
+.dse-tbar{flex:none;box-sizing:border-box;align-items:center;gap:6px;height:32px;padding:0 6px 0 12px;border-bottom:.5px solid var(--dsw-alias-border-l3);font-size:12px;color:var(--dsw-alias-label-secondary);display:flex}
+.dse-tbarBtn{width:26px;height:26px;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);cursor:pointer;background:0 0;border:none;flex:none;justify-content:center;align-items:center;padding:5px;line-height:1;display:inline-flex}
+.dse-tbarBtn svg{width:15px;height:15px}
+.dse-tbarBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-dock{flex:0 0 100%;min-width:100%;order:99;box-sizing:border-box;flex-direction:column;border-top:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-surface-base,transparent);display:flex}
+/* The built-in composer dock row must wrap so the terminal gets its own full-width line (pills stay on the first line). Scoped to the hashed InputBar dock class of the current DSH build. */
+.uV2eYG_dock{flex-wrap:wrap}
+.dse-dockGrip{height:6px;flex:none;cursor:ns-resize;touch-action:none}
+.dse-dockGrip:hover{background:var(--dsw-alias-border-strong,rgba(127,156,245,.35))}
+.dse-dockBody{flex:1;min-height:0;position:relative}
+.dse-dockPh{height:100%;justify-content:center;align-items:center;flex-direction:column;gap:8px;color:var(--dsw-alias-label-tertiary);font-size:12px;display:flex}
+.dse-dockProbe{flex:none;max-width:100%;color:var(--dsw-alias-label-tertiary);font-size:11px;text-align:center;word-break:break-all;padding:0 12px;opacity:.9}
 `;
 
     /** Inject the stylesheet once; returns its disposer for `ctx.effect`. */
@@ -491,6 +774,17 @@ window.__ModuleLoader__.load({
       "editor.saveFailed": "保存失败：{message}",
       "editor.loadFailed": "读取失败：{message}",
       "editor.hint": "Ctrl+S 保存",
+      "tool.dock": "停靠到输入框下方",
+      "tool.restore": "移回侧边栏",
+      "dock.placeholder": "终端已停靠到输入框下方",
+      "dock.open": "打开终端",
+      "dock.loading": "正在载入终端…",
+      "dock.failed": "终端组件载入失败，可点击右侧按钮重试",
+      "dock.probeOk": "停靠诊断：条目已注册并正常渲染",
+      "dock.probeNotMounted": "停靠诊断：条目已注册但停靠区未挂载",
+      "dock.probePending": "停靠诊断：条目尚未注册（仍在等待输入框下方槽位声明）",
+      "dock.probeRegFail": "停靠诊断：条目注册失败",
+      "dock.probeRenderFail": "停靠诊断：停靠区渲染失败",
     };
 
     const en = {
@@ -558,6 +852,17 @@ window.__ModuleLoader__.load({
       "editor.saveFailed": "Saving failed: {message}",
       "editor.loadFailed": "Reading failed: {message}",
       "editor.hint": "Ctrl+S to save",
+      "tool.dock": "Dock below the composer",
+      "tool.restore": "Move back to the sidebar",
+      "dock.placeholder": "The terminal is docked below the composer",
+      "dock.open": "Open a terminal",
+      "dock.loading": "Loading the terminal…",
+      "dock.failed": "Loading the terminal component failed — retry with the button",
+      "dock.probeOk": "Dock probe: entry registered and rendering",
+      "dock.probeNotMounted": "Dock probe: entry registered but the dock is not mounted",
+      "dock.probePending": "Dock probe: entry not registered yet (still waiting for the composer-dock slot declaration)",
+      "dock.probeRegFail": "Dock probe: entry registration failed",
+      "dock.probeRenderFail": "Dock probe: dock render failed",
     };
 
     //#endregion
@@ -588,6 +893,26 @@ window.__ModuleLoader__.load({
         jsx("circle", { cx: 8, cy: 3.2, r: 1.25 }),
         jsx("circle", { cx: 8, cy: 8, r: 1.25 }),
         jsx("circle", { cx: 8, cy: 12.8, r: 1.25 }),
+      ],
+    });
+
+    /** Dock-down: a pane sliding to the bottom edge (arrow into a tray). */
+    const DockDownIcon = () => jsxs("svg", {
+      viewBox: "0 0 16 16", width: 15, height: 15, fill: "none", stroke: "currentColor",
+      strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
+      children: [
+        jsx("path", { d: "M2.6 9.6v2.2a1 1 0 0 0 1 1h8.8a1 1 0 0 0 1-1V9.6" }),
+        jsx("path", { d: "M8 9.4V2.4M5.4 7 8 9.6 10.6 7" }),
+      ],
+    });
+
+    /** Dock-right: a pane sliding to the right edge (arrow into a right gutter). */
+    const DockRightIcon = () => jsxs("svg", {
+      viewBox: "0 0 16 16", width: 15, height: 15, fill: "none", stroke: "currentColor",
+      strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
+      children: [
+        jsx("path", { d: "M9.6 2.6h2.2a1 1 0 0 1 1 1v8.8a1 1 0 0 1-1 1H9.6" }),
+        jsx("path", { d: "M9.4 8H2.4M7 5.4 9.6 8 7 10.6" }),
       ],
     });
 
@@ -1581,15 +1906,300 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
+    //#region terminal dock bodies
+
+    /**
+     * Per-apply bindings the terminal components resolve lazily: the theme
+     * hook, the built-in terminal locale translator, and the per-session view
+     * helpers. Assigned once in `apply` (single plugin instance).
+     */
+    const terminalRuntime = { useTheme: undefined, tTerm: undefined, helpersFor: undefined };
+
+    /** Load the built-in terminal chunk once when enabled (`enabledKey > 0`).
+     * Yields `undefined` while loading, `null` on failure (retry by bumping the
+     * key), or `{ Body }` with the chunk's `TerminalBody` component.
+     */
+    function useTerminalChunk(enabledKey) {
+      const [state, setState] = React.useState(undefined);
+      React.useEffect(() => {
+        if (enabledKey <= 0) return;
+        let disposed = false;
+        setState(undefined);
+        ensureTerminalChunk(require).then(
+          (chunk) => {
+            if (!disposed) setState({ Body: chunk?.TerminalBody });
+          },
+          () => {
+            if (!disposed) setState(null);
+          },
+        );
+        return () => {
+          disposed = true;
+        };
+      }, [enabledKey]);
+      return state;
+    }
+
+    /**
+     * Seat the built-in `TerminalBody` on my own inject bindings. The chunk
+     * component is a plain React component — it only consumes the props below
+     * (verified against the shipped chunk), so no slot machinery is involved.
+     */
+    function BoundTerminalBody({ Body, helpers, useTheme, tTerm, tab }) {
+      return jsx(Body, {
+        useTabInfo: () => ({ tab }),
+        useTerminal: helpers.stateHook,
+        useTheme,
+        view: helpers.view,
+        t: tTerm,
+      });
+    }
+
+    /**
+     * The shadow body for `sidebar.right.pane.tab` under the built-in
+     * terminal's key. In `right` mode it hosts the built-in terminal body
+     * under a slim toolbar with the dock toggle; in `bottom` mode the pane
+     * shows a placeholder and the composer dock owns the terminal.
+     */
+    function SidebarTerminalShadowBody({ sessionId, useTabInfo, t }) {
+      if (typeof sessionId === "string") dockSession.sidebarSessionId = sessionId;
+      const mode = useDockMode();
+      const { tab } = useTabInfo();
+      const [attempt, setAttempt] = React.useState(1);
+      const chunk = useTerminalChunk(mode === "right" ? attempt : 0);
+      const [, tickProbe] = React.useReducer((value) => value + 1, 0);
+      React.useEffect(() => {
+        if (mode === "right") return undefined;
+        const timer = window.setInterval(tickProbe, 1000);
+        return () => window.clearInterval(timer);
+      }, [mode]);
+
+      const onDockDown = React.useCallback(() => {
+        dockStore.setMode("bottom");
+      }, []);
+      const onRestore = React.useCallback(() => {
+        dockStore.setMode("right");
+      }, []);
+      const onRetry = React.useCallback(() => {
+        setAttempt((value) => value + 1);
+      }, []);
+
+      if (mode !== "right") {
+        const probe = dockProbe.registered
+          ? dockProbe.renderError === ""
+            ? dockProbe.mounted
+              ? t("dock.probeOk")
+              : `${t("dock.probeNotMounted")} (${dockProbe.lastBlock})`
+            : `${t("dock.probeRenderFail")}: ${dockProbe.renderError}`
+          : dockProbe.error === ""
+            ? t("dock.probePending")
+            : `${t("dock.probeRegFail")}: ${dockProbe.error}`;
+        return jsxs("div", {
+          className: "dse-dockPh",
+          children: [
+            jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+              jsx("span", { children: t("dock.placeholder") }),
+              jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.restore"), "aria-label": t("tool.restore"), onClick: onRestore, children: jsx(DockRightIcon, {}) }),
+            ] }),
+            jsx("div", { className: "dse-dockProbe", children: probe }),
+          ],
+        });
+      }
+
+      const helpers = terminalRuntime.helpersFor(sessionId);
+      if (chunk === undefined || chunk === null || chunk.Body === undefined) {
+        return jsxs("div", {
+          className: "dse-dock",
+          style: { height: "100%" },
+          children: [
+            jsx(DockToolbar, { t, onDockDown }),
+            jsx("div", {
+              className: "dse-dockPh",
+              children: chunk === undefined ? t("dock.loading") : jsxs(Fragment, {
+                children: [
+                  jsx("span", { children: t("dock.failed") }),
+                  jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.restore"), onClick: onRetry, children: jsx(P.IconRefreshOutlineRegular, {}) }),
+                ],
+              }),
+            }),
+          ],
+        });
+      }
+      return jsxs("div", {
+        className: "dse-dock",
+        style: { height: "100%" },
+        children: [
+          jsx(DockToolbar, { t, onDockDown }),
+          jsx("div", { className: "dse-dockBody", children: jsx(BoundTerminalBody, { Body: chunk.Body, helpers, useTheme: terminalRuntime.useTheme, tTerm: terminalRuntime.tTerm, tab }) }),
+        ],
+      });
+    }
+
+    /** The slim toolbar row used by both seats (only the dock toggle for now). */
+    function DockToolbar({ t, onDockDown }) {
+      return jsx("div", {
+        className: "dse-tbar",
+        children: jsx("button", {
+          className: "dse-tbarBtn",
+          type: "button",
+          title: t("tool.dock"),
+          "aria-label": t("tool.dock"),
+          onClick: onDockDown,
+          children: jsx(DockDownIcon, {}),
+        }),
+      });
+    }
+
+    /**
+     * The composer-dock entry: when docked below the composer and a terminal
+     * tab of this session is open, re-seat the same terminal view under the
+     * conversation input with a drag grip for the height.
+     */
+    function makeComposerDock(ctx, themeHook, tTerm, helpersFor) {
+      /** Stable openTabs subscription for React external stores. */
+      const subscribeOpenTabs = (listener) => ctx.sidebarRight.openTabs.subscribe(listener);
+      /** Last open terminal tab id (any session); occurrence checks happen per render. */
+      const lastTerminalTabId = () => {
+        const terminals = ctx.sidebarRight.openTabs.getSnapshot().filter((tab) => tab?.kind === "terminal");
+        return terminals.length === 0 ? undefined : terminals[terminals.length - 1].tabId;
+      };
+      return function TerminalComposerDock({ sessionId, t }) {
+        const mode = useDockMode();
+        const height = useDockHeight();
+        const [attempt, setAttempt] = React.useState(1);
+        const [, tickPoll] = React.useReducer((value) => value + 1, 0);
+        React.useEffect(() => {
+          if (mode !== "bottom") return undefined;
+          const timer = window.setInterval(tickPoll, 300);
+          return () => window.clearInterval(timer);
+        }, [mode]);
+        const watching = React.useSyncExternalStore(subscribeOpenTabs, lastTerminalTabId) !== undefined;
+        const chunk = useTerminalChunk(mode === "bottom" && watching ? attempt : 0);
+
+        const onRestore = React.useCallback(() => {
+          dockStore.setMode("right");
+        }, []);
+        const onRetry = React.useCallback(() => {
+          setAttempt((value) => value + 1);
+        }, []);
+        const onGripPointerDown = React.useCallback((event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          const grip = event.currentTarget;
+          grip.setPointerCapture(event.pointerId);
+          const startY = event.clientY;
+          const startHeight = dockStore.height;
+          const onMove = (moveEvent) => {
+            dockStore.setHeight(startHeight + (startY - moveEvent.clientY));
+          };
+          const onUp = () => {
+            grip.removeEventListener("pointermove", onMove);
+            grip.removeEventListener("pointerup", onUp);
+            grip.removeEventListener("pointercancel", onUp);
+          };
+          grip.addEventListener("pointermove", onMove);
+          grip.addEventListener("pointerup", onUp);
+          grip.addEventListener("pointercancel", onUp);
+        }, []);
+
+        if (mode !== "bottom") {
+          dockProbe.lastBlock = "mode";
+          dockProbe.mounted = false;
+          return null;
+        }
+        const sid = typeof dockSession.sidebarSessionId === "string" ? dockSession.sidebarSessionId : sessionId;
+        const terminals = ctx.sidebarRight.openTabs.getSnapshot().filter((tab) => tab?.kind === "terminal");
+        dockProbe.terminalTabCount = terminals.length;
+        let tabId;
+        let occurrence;
+        let occurrenceError = "";
+        for (let index = terminals.length - 1; index >= 0; index -= 1) {
+          const candidate = terminals[index];
+          if (candidate.sessionId !== sid) continue;
+          try {
+            occurrence = ctx.sidebarRight.tabDomain.occurrence(candidate.sessionId, { id: candidate.tabId });
+            tabId = candidate.tabId;
+            break;
+          } catch (error) {
+            occurrence = undefined;
+            occurrenceError = String(error?.message ?? error);
+          }
+        }
+        if (occurrence === undefined) {
+          const sidLabel = sid === sessionId ? "sid" : "sid(shadow)";
+          dockProbe.lastBlock = terminals.length === 0
+            ? `tabId(tabs=0; ${sidLabel}=${typeof sid === "string" ? sid : String(sid)})`
+            : `tabId(err: ${occurrenceError}; ${sidLabel}=${typeof sid === "string" ? sid : String(sid)})`;
+          dockProbe.mounted = false;
+          return null;
+        }
+
+        try {
+          const tab = {
+            id: tabId,
+            kind: "terminal",
+            visible: true,
+            signal: occurrence.signal,
+            actions: occurrence.tabActions,
+          };
+          const helpers = helpersFor(sid);
+          const restore = jsx("button", {
+            className: "dse-tbarBtn",
+            type: "button",
+            title: t("tool.restore"),
+            "aria-label": t("tool.restore"),
+            onClick: onRestore,
+            children: jsx(DockRightIcon, {}),
+          });
+
+          let body;
+          if (chunk === undefined) {
+            body = jsx("div", { className: "dse-dockPh", children: t("dock.loading") });
+          } else if (chunk === null || chunk.Body === undefined) {
+            body = jsxs("div", { className: "dse-dockPh", children: [
+              jsx("span", { children: t("dock.failed") }),
+              jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.restore"), onClick: onRetry, children: jsx(P.IconRefreshOutlineRegular, {}) }),
+            ] });
+          } else {
+            body = jsx(BoundTerminalBody, { Body: chunk.Body, helpers, useTheme: themeHook, tTerm, tab });
+          }
+
+          dockProbe.renderError = "";
+          dockProbe.lastBlock = "";
+          dockProbe.mounted = true;
+          return jsxs("div", {
+            className: "dse-dock",
+            style: { height },
+            children: [
+              jsx("div", { className: "dse-dockGrip", onPointerDown: onGripPointerDown }),
+              jsxs("div", { className: "dse-tbar", children: [
+                jsx("span", { children: tTerm("title") }),
+                jsx("span", { style: { flex: 1 } }),
+                restore,
+              ] }),
+              jsx("div", { className: "dse-dockBody", children: body }),
+            ],
+          });
+        } catch (error) {
+          dockProbe.renderError = String(error?.message ?? error);
+          return jsxs("div", { className: "dse-dock", style: { height }, children: [
+            jsx("div", { className: "dse-dockPh", children: `${t("dock.probeRenderFail")}: ${dockProbe.renderError}` }),
+          ] });
+        }
+      };
+    }
+
+    //#endregion
+
     //#region plugin body
 
-    /** Required client services: slots, locale, the workspace-files Remote, and the document preview registry. */
-    const inject = ["slots", "locale", "remote", "remote.workspaceFiles", "documentPreviews"];
+    /** Required client services: slots, locale, the workspace-files Remote, the document preview registry, plus the terminal dock's services. */
+    const inject = ["slots", "locale", "remote", "remote.workspaceFiles", "documentPreviews", "sidebarRight", "webTerminals", "theme"];
 
     /**
      * Client plugin body: inject the stylesheet and dictionaries, shadow the
-     * built-in files tree, and — when the document preview registry is present —
-     * register the editable renderer and its document body.
+     * built-in files tree, register the editable renderer, and re-seat the
+     * built-in terminal body between the sidebar and the composer dock.
      */
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
@@ -1637,6 +2247,56 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: (sessionId) => ({ makeFace: (id) => makeFace(ctx, id ?? sessionId) }),
         }, EditorBody)), "sidebar-enhancement: editable document body");
+      }
+
+      // Terminal dock: only when every collaborating service is present.
+      const terminalReady = ctx.sidebarRight !== undefined && ctx.webTerminals !== undefined && ctx.theme !== undefined;
+      if (terminalReady) {
+        // Bind the runtime the terminal components resolve lazily. The theme
+        // hook and the built-in terminal translator mirror the built-in body's
+        // own registration (theme/change + 'sidebarTerminal' namespace).
+        terminalRuntime.useTheme = selectorHookFor(themeSourceFor(ctx));
+        terminalRuntime.tTerm = ctx.locale.bind("sidebarTerminal");
+        const helpersCache = new Map();
+        terminalRuntime.helpersFor = (sessionId) => {
+          let helpers = helpersCache.get(sessionId);
+          if (helpers === undefined) {
+            helpers = makeTerminalHelpers(ctx, sessionId);
+            helpersCache.set(sessionId, helpers);
+          }
+          return helpers;
+        };
+
+        // Shadow the built-in terminal body so its seat can be switched to the
+        // composer dock. No children: the body renders the built-in component
+        // directly, never via renderSlot.
+        ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({
+          name: "sidebar.right.pane.tab",
+          key: TERMINAL_ID,
+          priority: -1,
+          locale: NS,
+        }, SidebarTerminalShadowBody)), "sidebar-enhancement: terminal body seat");
+
+        // The composer dock entry. `conversation.composer.dock` is declared by
+        // the built-in conversation package; slots.inject waits for that
+        // declaration before registering.
+        const themeHook = terminalRuntime.useTheme;
+        ctx.effect(() => ctx.slots.inject("conversation.composer.dock", () => {
+          try {
+            const disposer = ctx.slots.register({
+              name: "conversation.composer.dock",
+              id: DOCK_ID,
+              locale: NS,
+            }, makeComposerDock(ctx, themeHook, terminalRuntime.tTerm, terminalRuntime.helpersFor));
+            dockProbe.registered = true;
+            dockProbe.error = "";
+            return disposer;
+          } catch (error) {
+            dockProbe.registered = false;
+            dockProbe.error = String(error?.message ?? error);
+            throw error;
+          }
+        }), "sidebar-enhancement: terminal composer dock");
       }
     }
 
