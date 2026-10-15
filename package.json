@@ -1,0 +1,57 @@
+{
+  "name": "dsh-sidebar-enhancement",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Enhanced Sidebar files panel: rename, create, upload, delete, plus an editable document renderer with save.",
+  "license": "MIT",
+  "author": "xmwengxing",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xmwengxing/dsh-sidebar-enhancement.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xmwengxing/dsh-sidebar-enhancement/issues"
+  },
+  "homepage": "https://github.com/xmwengxing/dsh-sidebar-enhancement#readme",
+  "keywords": [
+    "dsh",
+    "deepseek",
+    "harness",
+    "cordis",
+    "plugin",
+    "sidebar",
+    "file-tree",
+    "editor"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-workspace-files",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar-files",
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+      ]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sidebar Enhancement",
+    "description": "Adds rename, new file, new folder, upload and delete to the Sidebar files tree, plus an editable, savable document preview."
+  }
+}
