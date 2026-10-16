@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Sidebar Enhancement",
-    "description": "Adds rename, new file, new folder, upload and delete to the Sidebar files tree, plus an editable, savable document preview."
+    "description": "Adds rename, new file, new folder, upload, download, delete and copy-full-path to the Sidebar files tree, an editable, savable document preview, and a quick-command library beside the bottom terminal panel."
   }
 }

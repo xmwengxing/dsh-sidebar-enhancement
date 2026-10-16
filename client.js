@@ -54,6 +54,8 @@ window.__ModuleLoader__.load({
       rename: "/sidebar-enhancer/rename",
       remove: "/sidebar-enhancer/remove",
       upload: "/sidebar-enhancer/upload",
+      /** Read route: a GET the browser turns into a blob download. */
+      download: "/sidebar-enhancer/download",
     };
 
     /** One uploaded file's largest size (the Host decodes at 48 MiB, body cap 64 MiB). */
@@ -87,6 +89,74 @@ window.__ModuleLoader__.load({
     /** The absolute path of one child entry, joined with `/` whatever the parent's separators. */
     function childPath(parent, name) {
       return `${parent.replace(/[/\\]+$/, "")}/${name}`;
+    }
+
+    /** The final path segment, whatever separator spelling the path uses. */
+    function baseName(path) {
+      const parts = String(path).split(/[/\\]+/).filter((part) => part !== "");
+      return parts.length === 0 ? "file" : parts[parts.length - 1];
+    }
+
+    /**
+     * One workspace path in the spelling the desktop uses: a Windows-style path
+     * gets backslashes (so it pastes into Explorer, cmd or PowerShell as-is);
+     * a POSIX path is already native.
+     */
+    function nativePath(path) {
+      const value = String(path);
+      if (!/^[A-Za-z]:[/\\]/.test(value) && !value.startsWith("\\\\")) return value;
+      return value.replace(/\//g, "\\");
+    }
+
+    /** The UTF-8 name out of one `Content-Disposition` header, when present. */
+    function fileNameFromHeader(header) {
+      if (typeof header !== "string") return undefined;
+      const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
+      if (utf8 !== null) {
+        try {
+          return decodeURIComponent(utf8[1].trim());
+        } catch {
+          /* fall through to the ASCII form */
+        }
+      }
+      const plain = /filename="([^"]*)"/i.exec(header);
+      return plain === null ? undefined : plain[1];
+    }
+
+    /** Hand one blob to the browser's downloads, then release the object URL. */
+    function saveBlob(blob, name) {
+      const url = URL.createObjectURL(blob);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = name;
+        anchor.rel = "noopener";
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      }
+    }
+
+    /** Copy through a throwaway textarea, for pages without the async clipboard API. */
+    function legacyCopy(text) {
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "true");
+        area.style.position = "fixed";
+        area.style.top = "-1000px";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand("copy");
+        area.remove();
+        return copied === true;
+      } catch {
+        return false;
+      }
     }
 
     /** Whether a new file or directory name is a single usable segment. */
@@ -248,6 +318,7 @@ window.__ModuleLoader__.load({
         case "unknown-workspace": return t("op.unknownWorkspace");
         case "payload-too-large":
         case "workspace-file/too-large": return t("op.tooLarge");
+        case "archive-too-large": return t("op.archiveTooLarge");
         case "denied": return t("op.denied");
         case "network": return t("op.network", { message: error.message });
         default: return t("op.failed", { message: error.message ?? String(error.code ?? error) });
@@ -351,6 +422,9 @@ window.__ModuleLoader__.load({
         rename: (from, to) => route(ROUTES.rename, { from, to }),
         remove: (path) => route(ROUTES.remove, { path }),
         upload: (path, bytes, overwrite, signal) => route(ROUTES.upload, { path, data: bytesToBase64(bytes), overwrite }, signal),
+        /** The GET URL that hands one path back as a file (directories as a ZIP). */
+        downloadUrl: (path) =>
+          `${ROUTES.download}?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`,
       };
     }
 
@@ -651,6 +725,61 @@ window.__ModuleLoader__.load({
 .dse-panelTabClose:hover{color:var(--dsw-alias-feedback-danger-fg,#e5484d);background:var(--dsw-alias-interactive-bg-hover)}
 .dse-panelActions{flex:none;align-items:center;gap:2px;display:flex}
 .dse-panelEmpty{align-self:center;color:var(--dsw-alias-label-tertiary);padding:0 6px}
+/* The quick-command dialog: one wide card holding a nav column and a pane. It
+   is built on the host Modal, so only the card's size and the layout inside
+   the modal body are this plugin's business. */
+.dse-qcDialog{width:min(780px,100%);height:min(620px,100%);padding-bottom:0}
+.dse-qcContent{flex:1;min-height:0;gap:0}
+/* The modal body carries 24px side padding and a 20px top margin; both are
+   cancelled here so the two panes reach the card's edges. */
+.dse-qcLayout{margin:-20px -24px 0;flex:1;min-height:0;display:flex}
+.dse-qcNav{flex:none;width:172px;box-sizing:border-box;padding:12px 8px;border-right:.5px solid var(--dsw-alias-border-l3);flex-direction:column;gap:2px;display:flex}
+.dse-qcNavItem{width:100%;box-sizing:border-box;text-align:left;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;font:inherit;font-size:13px;padding:7px 10px}
+.dse-qcNavItem:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-qcNavItem[data-active=true]{color:var(--dsw-alias-label-primary);font-weight:500;background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}
+.dse-qcPane{flex:1;min-width:0;min-height:0;flex-direction:column;display:flex}
+.dse-qcScroll{flex:1;min-height:0;overflow:auto;padding:10px 12px;scrollbar-gutter:stable}
+.dse-qcGroup{margin:0 0 4px}
+.dse-qcGroupHead{width:100%;box-sizing:border-box;align-items:center;gap:6px;height:28px;text-align:left;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;font:inherit;font-size:12px;padding:0 6px;display:flex}
+.dse-qcGroupHead:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-qcGroupHead svg{width:12px;height:12px;flex:none}
+.dse-qcGroupName{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden;font-weight:500}
+.dse-qcCount{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.dse-qcList{margin:0;padding:0 0 2px 18px;list-style:none;flex-direction:column;gap:1px;display:flex}
+.dse-qcRow{min-height:26px;align-items:center;gap:4px;padding:0 2px 0 8px;border-radius:var(--dsw-radius-sm);display:flex}
+.dse-qcRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dse-qcRow[data-selected=true]{background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}
+.dse-qcName{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;text-align:left;border:0;background:0 0;padding:0}
+button.dse-qcName{cursor:pointer}
+.dse-qcRow[data-selected=true] .dse-qcName{font-weight:500}
+.dse-qcCopy{width:22px;height:22px;flex:none;justify-content:center;align-items:center;padding:3px;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-tertiary);background:0 0;display:inline-flex}
+.dse-qcCopy svg{width:13px;height:13px}
+.dse-qcCopy:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-qcCopy[data-copied=true]{color:var(--dsw-alias-feedback-success-fg,#3fb950)}
+.dse-qcRun{width:22px;height:22px;flex:none;justify-content:center;align-items:center;padding:3px;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-tertiary);background:0 0;display:inline-flex}
+.dse-qcRun svg{width:13px;height:13px}
+.dse-qcRun:hover{color:var(--dsw-alias-feedback-success-fg,#3fb950);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-qcEmpty{margin:0;padding:8px 6px;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dse-qcForm{flex:none;flex-direction:column;gap:8px;padding:10px 12px 12px;border-top:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);display:flex}
+.dse-qcFormHead{min-height:20px;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;display:flex}
+.dse-qcFormTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden}
+.dse-qcLink{border:0;cursor:pointer;color:var(--dsw-alias-state-business-primary);background:0 0;font:inherit;font-size:12px;padding:0}
+.dse-qcLink:hover{text-decoration:underline}
+.dse-qcField{align-items:flex-start;gap:8px;display:flex}
+.dse-qcLabel{flex:none;width:40px;padding-top:6px;color:var(--dsw-alias-label-secondary);font-size:12px}
+.dse-qcInput{flex:1;min-width:0;box-sizing:border-box;height:28px;border:1px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);font:inherit;font-size:13px;padding:0 8px;outline:0}
+.dse-qcInput:focus{border-color:var(--dsw-alias-state-business-primary)}
+.dse-qcInput::placeholder{color:var(--dsw-alias-label-dimmed,var(--dsw-alias-label-tertiary))}
+.dse-qcTextarea{height:auto;min-height:64px;resize:vertical;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px;padding:5px 8px}
+.dse-qcActions{min-height:28px;align-items:center;gap:8px;padding-top:2px;display:flex}
+.dse-qcNotice{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dse-qcIo{flex-direction:column;gap:12px;padding:16px;display:flex;max-width:520px}
+.dse-qcIoHint{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6}
+.dse-qcIoNote{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.6}
+.dse-qcIoState{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
+.dse-qcIoState[data-qc-io-state=unavailable]{color:var(--dsw-alias-feedback-warning-fg,#d29922)}
+.dse-qcWarn{margin:0 0 8px;padding:6px 8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-feedback-warning-bg,rgba(210,153,34,.12));color:var(--dsw-alias-feedback-warning-fg,#d29922);font-size:12px;line-height:1.5}
+.dse-qcFile{display:none}
 `;
 
     /** Inject the stylesheet once; returns its disposer for `ctx.effect`. */
@@ -697,8 +826,12 @@ window.__ModuleLoader__.load({
       "menu.newFile": "新建文件",
       "menu.newDir": "新建目录",
       "menu.uploadHere": "上传到此目录",
+      "menu.download": "下载",
+      "menu.downloadDir": "下载目录（.zip）",
+      "menu.copyPath": "复制完整路径",
       "menu.rename": "重命名",
       "menu.delete": "删除",
+      "menu.refresh": "刷新",
       "create.filePlaceholder": "新文件名",
       "create.dirPlaceholder": "新目录名",
       renameHint: "Enter 确认 · Esc 取消",
@@ -707,6 +840,7 @@ window.__ModuleLoader__.load({
       "busy.rename": "正在重命名…",
       "busy.delete": "正在删除…",
       "busy.upload": "正在上传…",
+      "busy.download": "正在下载…",
       "busy.refresh": "正在刷新…",
       "confirm.deleteFile": "确定删除文件“{name}”吗？此操作不可恢复。",
       "confirm.deleteDir": "确定删除目录“{name}”及其全部内容吗？此操作不可恢复。",
@@ -718,6 +852,10 @@ window.__ModuleLoader__.load({
       "op.conflict": "文件已被修改",
       "op.unknownWorkspace": "会话工作区未知",
       "op.tooLarge": "内容过大",
+      "op.archiveTooLarge": "目录过大，无法打包下载",
+      "op.downloadFailed": "下载失败：{message}",
+      "copy.done": "已复制完整路径：{path}",
+      "copy.failed": "复制失败，完整路径：{path}",
       "op.denied": "没有权限执行此操作",
       "op.network": "网络错误：{message}",
       "op.failed": "操作失败：{message}",
@@ -746,6 +884,54 @@ window.__ModuleLoader__.load({
       "tool.newTerminal": "新建终端",
       "dock.loading": "正在载入终端…",
       "dock.failed": "终端组件载入失败，请刷新页面重试",
+      "qc.button": "快捷命令",
+      "qc.title": "快捷命令",
+      "qc.navView": "查看命令",
+      "qc.navAdd": "添加命令",
+      "qc.copy": "复制命令",
+      "qc.copyNamed": "复制命令“{name}”",
+      "qc.copyFailed": "复制失败，请手动选择命令文本",
+      "qc.ungrouped": "未分组",
+      "qc.empty": "还没有命令，切到「添加命令」添加第一条",
+      "qc.newCommand": "新命令",
+      "qc.editing": "正在编辑：{name}",
+      "qc.untitled": "未命名",
+      "qc.fieldName": "名称",
+      "qc.fieldGroup": "分组",
+      "qc.fieldNote": "备注",
+      "qc.fieldCommand": "命令",
+      "qc.namePlaceholder": "例如：启动开发服务器",
+      "qc.groupPlaceholder": "例如：前端，可留空",
+      "qc.notePlaceholder": "可选的说明",
+      "qc.commandPlaceholder": "例如：pnpm dev",
+      "qc.add": "添加",
+      "qc.save": "保存",
+      "qc.added": "已添加",
+      "qc.saved": "已保存",
+      "qc.needFields": "名称和命令不能为空",
+      "qc.needSelection": "先在上方选择一个命令",
+      "qc.gone": "该命令已不存在",
+      "qc.run": "在当前终端运行",
+      "qc.runNamed": "在终端运行“{name}”",
+      "qc.ran": "已发送到终端：{name}",
+      "qc.runNoTerminal": "底部面板还没有终端，先点 + 新建一个",
+      "qc.runNotReady": "终端尚未连接，等它连接后再试",
+      "qc.navIo": "备份与恢复",
+      "qc.ioHint": "命令库保存在 {path}，可跨浏览器与端口使用。",
+      "qc.ioPathUnknown": "DSH 主目录（尚未读取到）",
+      "qc.ioNote": "当前共 {count} 条命令。备份导出 JSON 文件；恢复会整体覆盖现有命令库；打开面板时，本机独有的命令会自动补进库里，不会丢。",
+      "qc.backup": "备份",
+      "qc.restore": "恢复",
+      "qc.backedUp": "已导出 {count} 条命令",
+      "qc.backupFailed": "备份失败，请重试",
+      "qc.restoreConfirm": "将用备份中的 {count} 条命令整体覆盖当前命令库，继续？",
+      "qc.restored": "已恢复 {count} 条命令",
+      "qc.restoreFailed": "恢复失败：文件无法解析为命令库",
+      "qc.restoreEmpty": "恢复失败：文件中没有可用命令",
+      "qc.ioState.host": "已连接 DSH 主目录中的命令库，修改会自动保存。",
+      "qc.ioState.local": "正在读取 DSH 主目录中的命令库…",
+      "qc.ioState.unavailable": "无法读写 DSH 主目录：命令只保存在当前浏览器里，重启或换端口后可能丢失。请用「备份」导出。",
+      "qc.ioWarn": "当前命令只存在浏览器缓存中（未能写入 DSH 主目录）。建议在「备份与恢复」里导出备份。",
     };
 
     const en = {
@@ -771,8 +957,12 @@ window.__ModuleLoader__.load({
       "menu.newFile": "New file",
       "menu.newDir": "New directory",
       "menu.uploadHere": "Upload here",
+      "menu.download": "Download",
+      "menu.downloadDir": "Download folder (.zip)",
+      "menu.copyPath": "Copy full path",
       "menu.rename": "Rename",
       "menu.delete": "Delete",
+      "menu.refresh": "Refresh",
       "create.filePlaceholder": "New file name",
       "create.dirPlaceholder": "New directory name",
       renameHint: "Enter to confirm · Esc to cancel",
@@ -781,6 +971,7 @@ window.__ModuleLoader__.load({
       "busy.rename": "Renaming…",
       "busy.delete": "Deleting…",
       "busy.upload": "Uploading…",
+      "busy.download": "Downloading…",
       "busy.refresh": "Refreshing…",
       "confirm.deleteFile": "Delete file “{name}”? This cannot be undone.",
       "confirm.deleteDir": "Delete directory “{name}” and everything inside? This cannot be undone.",
@@ -792,6 +983,10 @@ window.__ModuleLoader__.load({
       "op.conflict": "File changed on disk",
       "op.unknownWorkspace": "Unknown session workspace",
       "op.tooLarge": "Content too large",
+      "op.archiveTooLarge": "Directory too large to pack for download",
+      "op.downloadFailed": "Download failed: {message}",
+      "copy.done": "Full path copied: {path}",
+      "copy.failed": "Copy failed. Full path: {path}",
       "op.denied": "Permission denied",
       "op.network": "Network error: {message}",
       "op.failed": "Operation failed: {message}",
@@ -820,6 +1015,54 @@ window.__ModuleLoader__.load({
       "tool.newTerminal": "New terminal",
       "dock.loading": "Loading the terminal…",
       "dock.failed": "Loading the terminal component failed — refresh to retry",
+      "qc.button": "Quick commands",
+      "qc.title": "Quick commands",
+      "qc.navView": "View commands",
+      "qc.navAdd": "Add command",
+      "qc.copy": "Copy command",
+      "qc.copyNamed": "Copy the command “{name}”",
+      "qc.copyFailed": "Copy failed — select the command text manually",
+      "qc.ungrouped": "Ungrouped",
+      "qc.empty": "No commands yet — use “Add command” to create the first one",
+      "qc.newCommand": "New command",
+      "qc.editing": "Editing: {name}",
+      "qc.untitled": "untitled",
+      "qc.fieldName": "Name",
+      "qc.fieldGroup": "Group",
+      "qc.fieldNote": "Note",
+      "qc.fieldCommand": "Command",
+      "qc.namePlaceholder": "e.g. Start the dev server",
+      "qc.groupPlaceholder": "e.g. Frontend (optional)",
+      "qc.notePlaceholder": "Optional note",
+      "qc.commandPlaceholder": "e.g. pnpm dev",
+      "qc.add": "Add",
+      "qc.save": "Save",
+      "qc.added": "Added",
+      "qc.saved": "Saved",
+      "qc.needFields": "Name and command are required",
+      "qc.needSelection": "Pick a command above first",
+      "qc.gone": "That command no longer exists",
+      "qc.run": "Run in the current terminal",
+      "qc.runNamed": "Run “{name}” in the terminal",
+      "qc.ran": "Sent to the terminal: {name}",
+      "qc.runNoTerminal": "The panel has no terminal yet — use + to create one",
+      "qc.runNotReady": "The terminal is not connected yet — try again once it is",
+      "qc.navIo": "Backup & restore",
+      "qc.ioHint": "The library is stored at {path}, so it survives other browsers and ports.",
+      "qc.ioPathUnknown": "the DSH home directory (not read yet)",
+      "qc.ioNote": "{count} command(s). Backup exports a JSON file; restore replaces the whole library; commands that exist only in this browser are merged in when the panel opens.",
+      "qc.backup": "Backup",
+      "qc.restore": "Restore",
+      "qc.backedUp": "Exported {count} command(s)",
+      "qc.backupFailed": "Backup failed — try again",
+      "qc.restoreConfirm": "Replace the whole library with the {count} command(s) from this backup?",
+      "qc.restored": "Restored {count} command(s)",
+      "qc.restoreFailed": "Restore failed: the file is not a command library",
+      "qc.restoreEmpty": "Restore failed: the file holds no usable command",
+      "qc.ioState.host": "Connected to the library in the DSH home directory — changes are saved automatically.",
+      "qc.ioState.local": "Reading the library from the DSH home directory…",
+      "qc.ioState.unavailable": "The DSH home directory is unreachable: commands live only in this browser and can be lost after a restart or a port change. Use Backup to export them.",
+      "qc.ioWarn": "These commands live only in this browser's storage (the DSH home directory could not be written). Export a backup from “Backup & restore”.",
     };
 
     //#endregion
@@ -977,6 +1220,11 @@ window.__ModuleLoader__.load({
       if (target.kind === "file") items.push({ id: "open", label: t("menu.open") });
       if (target.kind === "directory") {
         items.push({ id: target.expanded === true ? "collapse" : "expand", label: t(target.expanded === true ? "menu.collapse" : "menu.expand") });
+      }
+      if (target.kind === "file" || target.kind === "directory") {
+        items.push({ type: "separator", id: "sep-transfer" });
+        items.push({ id: "download", label: target.kind === "directory" ? t("menu.downloadDir") : t("menu.download") });
+        items.push({ id: "copyPath", label: t("menu.copyPath") });
       }
       items.push({ id: "newFile", label: t("menu.newFile") });
       items.push({ id: "newDir", label: t("menu.newDir") });
@@ -1452,6 +1700,54 @@ window.__ModuleLoader__.load({
         void loadLevel(dir);
       }, [face, loadLevel, signal, t]);
 
+      /**
+       * Download one entry: a file's exact bytes, or a directory packed into a
+       * ZIP by the Host. The response is a raw body (not the JSON envelope the
+       * mutation routes use), so failures are read off the status instead.
+       */
+      const downloadEntry = React.useCallback(async (target) => {
+        if (busyRef.current !== null) {
+          setBanner({ kind: "info", text: t("op.busy") });
+          return;
+        }
+        busyRef.current = "download";
+        setBusy("download");
+        setBanner(null);
+        const fallbackName = target.kind === "directory" ? `${baseName(target.path)}.zip` : baseName(target.path);
+        try {
+          const response = await fetch(face.downloadUrl(target.path), { credentials: "same-origin" });
+          if (response.ok !== true) {
+            let payload;
+            try {
+              payload = await response.json();
+            } catch {
+              payload = undefined;
+            }
+            const remote = payload !== undefined && payload !== null && typeof payload === "object" ? payload.error : undefined;
+            const error = remote !== undefined && remote !== null
+              ? remote
+              : { code: `http-${response.status}`, message: `request failed with status ${response.status}` };
+            setBanner({ kind: "error", text: t("op.downloadFailed", { message: opMessage(t, error) }) });
+            return;
+          }
+          const blob = await response.blob();
+          saveBlob(blob, fileNameFromHeader(response.headers.get("content-disposition")) ?? fallbackName);
+        } catch (error) {
+          setBanner({ kind: "error", text: t("op.downloadFailed", { message: String(error?.message ?? error) }) });
+        } finally {
+          busyRef.current = null;
+          setBusy(null);
+        }
+      }, [face, t]);
+
+      /** Copy one entry's absolute path in the desktop's own spelling. */
+      const copyPath = React.useCallback(async (target) => {
+        const full = nativePath(target.path);
+        setBanner(null);
+        if (await copyText(full)) setBanner({ kind: "info", text: t("copy.done", { path: full }) });
+        else setBanner({ kind: "error", text: t("copy.failed", { path: full }) });
+      }, [t]);
+
       const openMenuAt = React.useCallback((x, y, target) => {
         setMenu({ x, y, target });
       }, []);
@@ -1486,6 +1782,14 @@ window.__ModuleLoader__.load({
           }
           return;
         }
+        if (id === "download") {
+          void downloadEntry(target);
+          return;
+        }
+        if (id === "copyPath") {
+          void copyPath(target);
+          return;
+        }
         if (id === "rename") {
           startRename(target.parent, target.path, target.name, target.kind);
           return;
@@ -1493,7 +1797,7 @@ window.__ModuleLoader__.load({
         if (id === "delete") {
           void deleteEntry(target);
         }
-      }, [deleteEntry, openPath, startCreate, startRename, toggle]);
+      }, [copyPath, deleteEntry, downloadEntry, openPath, startCreate, startRename, toggle]);
 
       /** Focus and preselect the inline rename input when a rename starts. */
       React.useEffect(() => {
@@ -1627,10 +1931,14 @@ window.__ModuleLoader__.load({
             "aria-hidden": true,
             tabIndex: -1,
             onChange: (event) => {
-              const files = event.target.files;
+              // Snapshot the selection BEFORE resetting the input: assigning to
+              // `value` empties the element's live FileList in place, so a
+              // `files` reference kept from before the reset would report
+              // length 0 and the whole upload would be skipped in silence.
+              const files = Array.from(event.target.files ?? []);
               const dir = uploadTargetRef.current;
               event.target.value = "";
-              if (dir !== null && dir !== undefined && files !== null && files.length > 0) void uploadTo(dir, files);
+              if (dir !== null && dir !== undefined && files.length > 0) void uploadTo(dir, files);
             },
             key: "file-input",
           }),
@@ -1964,6 +2272,810 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
+    //#region quick commands
+
+    /** localStorage key holding the quick-command library. */
+    const QUICK_STORE_KEY = "dsh-sidebar-enhancement.quickCommands";
+    /** Stored shape version; a future format bumps it and old values are dropped. */
+    const QUICK_STORE_VERSION = 1;
+    /** The empty draft the form fields start from. */
+    const EMPTY_DRAFT = { name: "", group: "", note: "", command: "" };
+    /** The `datalist` id backing the group field's suggestions. */
+    const QUICK_GROUP_LIST_ID = "dse-qc-groups";
+    /**
+     * The durable copy of the library lives in the harness home (see the Host
+     * half): browser storage is per-origin, so a restart on another port, a
+     * different host spelling, or another browser would silently start empty.
+     */
+    const QUICK_LOAD_PATH = "/sidebar-enhancer/quick/load";
+    const QUICK_SAVE_PATH = "/sidebar-enhancer/quick/save";
+    /** The library document's format tag; a backup file repeats it. */
+    const QUICK_BACKUP_FORMAT = "dsh-sidebar-enhancement.quick-commands";
+    /** How long a mutation waits before the library reaches the Host file. */
+    const QUICK_SAVE_DELAY = 400;
+
+    /** One fresh command id (unique per browser profile, no server involved). */
+    function quickId() {
+      const bytes = new Uint8Array(8);
+      globalThis.crypto.getRandomValues(bytes);
+      let hex = "";
+      for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+      return `qc-${hex}`;
+    }
+
+    /** Trim one draft into its stored shape, keeping a command's own line breaks. */
+    function normalizeCommand(fields) {
+      const clean = (value) => (typeof value === "string" ? value.trim() : "");
+      return {
+        name: clean(fields?.name),
+        group: clean(fields?.group),
+        note: clean(fields?.note),
+        command: clean(fields?.command).replace(/\r\n/g, "\n"),
+      };
+    }
+
+    /**
+     * Read a library document into command items. The Host document and a
+     * backup file share one shape (`{commands: [...]}`); a bare array is
+     * accepted too, since a hand-edited backup usually drops the wrapper.
+     * Entries without a command are skipped rather than refused, so one bad
+     * row cannot cost the user the rest of the library.
+     *
+     * @returns {object[]|null} normalized items, or null when the shape is not a library.
+     */
+    function readCommandList(value) {
+      const list = Array.isArray(value)
+        ? value
+        : value !== null && typeof value === "object" && Array.isArray(value.commands) ? value.commands : null;
+      if (list === null) return null;
+      const items = [];
+      for (const entry of list) {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+        const normalized = normalizeCommand(entry);
+        if (normalized.command === "") continue;
+        if (normalized.name === "") normalized.name = normalized.command.split("\n", 1)[0].slice(0, 60);
+        items.push({ id: typeof entry.id === "string" && entry.id !== "" ? entry.id : quickId(), ...normalized });
+      }
+      return items;
+    }
+
+    /** Identity of one command for merging: the visible content, not the id. */
+    function commandKey(item) {
+      return [item.name, item.group, item.note, item.command].join("\u0000");
+    }
+
+    /**
+     * Union two libraries, `primary` first. Two browsers that each added their
+     * own commands must not silently overwrite one another: the Host file wins
+     * on content, and anything only the local copy has is appended. Identical
+     * commands collapse, so reopening the same library is a no-op.
+     *
+     * @returns {{items: object[], added: number}} the merged list and how many entries came from `secondary`.
+     */
+    function mergeCommandLists(primary, secondary) {
+      const seen = new Set(primary.map(commandKey));
+      const items = [...primary];
+      let added = 0;
+      for (const item of secondary) {
+        const key = commandKey(item);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push(item);
+        added += 1;
+      }
+      return { items, added };
+    }
+
+    /** One library document: the on-disk shape, and the backup file's format. */
+    function commandDocument(items) {
+      return {
+        format: QUICK_BACKUP_FORMAT,
+        version: QUICK_STORE_VERSION,
+        savedAt: new Date().toISOString(),
+        commands: items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          group: item.group,
+          note: item.note,
+          command: item.command,
+        })),
+      };
+    }
+
+    /** A dated file name for one exported backup. */
+    function backupFileName() {
+      const now = new Date();
+      const pad = (value) => String(value).padStart(2, "0");
+      return `dsh-quick-commands-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.json`;
+    }
+
+    /**
+     * The quick-command library: one flat list of commands, grouped on read by
+     * each command's own `group` field. Deriving groups from the commands keeps
+     * a single source of truth — there is no separate group list that could
+     * disagree with what the commands say.
+     *
+     * Two copies are kept. localStorage is the synchronous one, so the first
+     * paint already has the library; the Host file is the durable one and wins
+     * on load, because browser storage is scoped to one origin and would drop
+     * the library whenever the harness answers on another port or host.
+     */
+    const quickStore = {
+      items: [],
+      loaded: false,
+      /** Local edits not yet written to the Host file. */
+      dirty: false,
+      /** Whether the Host copy has answered once (only success stops retries). */
+      hydrated: false,
+      /** Where the visible library came from: 'host' | 'local' | 'unavailable'. */
+      source: "local",
+      /** The Host file's symbolic path, once it answered. */
+      hostPath: "",
+      hydrating: undefined,
+      saveTimer: 0,
+      listeners: new Set(),
+      restore() {
+        if (this.loaded) return;
+        this.loaded = true;
+        try {
+          const raw = window.localStorage.getItem(QUICK_STORE_KEY);
+          if (typeof raw !== "string" || raw === "") return;
+          const saved = JSON.parse(raw);
+          if (saved === null || typeof saved !== "object" || saved.version !== QUICK_STORE_VERSION) return;
+          if (!Array.isArray(saved.commands)) return;
+          this.items = saved.commands
+            .filter((item) => item !== null && typeof item === "object")
+            .map((item) => ({
+              id: typeof item.id === "string" && item.id !== "" ? item.id : quickId(),
+              ...normalizeCommand(item),
+            }));
+        } catch {
+          // Unavailable or corrupt storage: start empty instead of throwing.
+        }
+      },
+      persist() {
+        try {
+          window.localStorage.setItem(QUICK_STORE_KEY, JSON.stringify({ version: QUICK_STORE_VERSION, commands: this.items }));
+        } catch {
+          // Storage unavailable: the library lives for this page only.
+        }
+      },
+      emit() {
+        for (const listener of this.listeners) listener();
+      },
+      subscribe(listener) {
+        this.listeners.add(listener);
+        return () => {
+          this.listeners.delete(listener);
+        };
+      },
+      /** A stable array reference between mutations (see `panelSeats.getSnapshot`). */
+      getSnapshot() {
+        return this.items;
+      },
+      /** Consult the Host copy once per page; concurrent callers share one request. */
+      hydrate() {
+        if (this.hydrated) return Promise.resolve();
+        if (this.hydrating !== undefined) return this.hydrating;
+        this.hydrating = this.loadFromHost();
+        return this.hydrating;
+      },
+      async loadFromHost() {
+        try {
+          const result = await callRoute(QUICK_LOAD_PATH, {});
+          if (result.ok !== true) {
+            this.source = "unavailable";
+            return;
+          }
+          this.source = "host";
+          this.hydrated = true;
+          if (typeof result.value.path === "string") this.hostPath = result.value.path;
+          const remote = result.value.document === undefined || result.value.document === null
+            ? null
+            : readCommandList(result.value.document);
+          if (this.dirty === true) {
+            // Edits made before the first answer win over the stored copy.
+            this.scheduleSave();
+            return;
+          }
+          if (remote === null) {
+            // The file holds no library yet: seed it from this browser's copy.
+            if (this.items.length > 0) this.scheduleSave();
+            return;
+          }
+          // The file is the shared record, but a second browser may hold
+          // commands it has never written; keep both copies instead of
+          // dropping whichever one arrived late.
+          const merged = mergeCommandLists(remote, this.items);
+          this.items = merged.items;
+          this.loaded = true;
+          this.persist();
+          if (merged.added > 0) this.scheduleSave();
+          else this.emit();
+        } catch {
+          this.source = "unavailable";
+        } finally {
+          this.hydrating = undefined;
+        }
+      },
+      /** Write the library to the Host file, coalescing a burst of edits. */
+      scheduleSave(delay) {
+        this.dirty = true;
+        if (typeof window === "undefined") return;
+        if (this.saveTimer !== 0) window.clearTimeout(this.saveTimer);
+        this.saveTimer = window.setTimeout(() => {
+          this.saveTimer = 0;
+          void this.saveToHost();
+        }, delay === undefined ? QUICK_SAVE_DELAY : delay);
+      },
+      async saveToHost() {
+        const payload = commandDocument(this.items);
+        this.dirty = false;
+        const result = await callRoute(QUICK_SAVE_PATH, { document: payload });
+        if (result.ok === true) {
+          this.source = "host";
+          if (typeof result.value.path === "string") this.hostPath = result.value.path;
+          this.emit();
+          return true;
+        }
+        // Keep the local copy authoritative and retry with the next edit.
+        this.dirty = true;
+        this.source = "unavailable";
+        this.emit();
+        return false;
+      },
+      add(fields) {
+        const item = { id: quickId(), ...normalizeCommand(fields) };
+        this.items = [...this.items, item];
+        this.persist();
+        this.scheduleSave();
+        this.emit();
+        return item;
+      },
+      update(id, fields) {
+        let saved;
+        this.items = this.items.map((item) => {
+          if (item.id !== id) return item;
+          saved = { id, ...normalizeCommand(fields) };
+          return saved;
+        });
+        if (saved === undefined) return undefined;
+        this.persist();
+        this.scheduleSave();
+        this.emit();
+        return saved;
+      },
+      /** Replace the whole library (restoring a backup file). */
+      replaceAll(items) {
+        this.items = items.map((item) => ({ ...item }));
+        this.loaded = true;
+        this.persist();
+        this.scheduleSave(0);
+        this.emit();
+        return this.items.length;
+      },
+    };
+    if (typeof window !== "undefined") quickStore.restore();
+
+    /** Stable subscription binding for the quick-command store. */
+    const subscribeQuick = (listener) => quickStore.subscribe(listener);
+
+    /** Reactive command list; the first read also pulls the durable copy. */
+    function useQuickCommands() {
+      const items = React.useSyncExternalStore(subscribeQuick, () => quickStore.getSnapshot());
+      React.useEffect(() => {
+        void quickStore.hydrate();
+      }, []);
+      return items;
+    }
+
+    /**
+     * Group a command list by its `group` field: first appearance first, and
+     * each group's commands in insertion order. An empty group sorts into the
+     * ungrouped bucket rather than being dropped.
+     * @returns {{key: string, commands: object[]}[]}
+     */
+    function groupCommands(items) {
+      const groups = [];
+      const index = new Map();
+      for (const item of items) {
+        let bucket = index.get(item.group);
+        if (bucket === undefined) {
+          bucket = { key: item.group, commands: [] };
+          index.set(item.group, bucket);
+          groups.push(bucket);
+        }
+        bucket.commands.push(item);
+      }
+      return groups;
+    }
+
+    /**
+     * Write text to the clipboard: the host primitive first, then the async
+     * Clipboard API, then a scratch textarea for origins where neither exists
+     * (the harness is reachable over plain HTTP on a LAN address, for example).
+     * @returns {Promise<boolean>} whether the host accepted the write.
+     */
+    async function copyText(text) {
+      if (typeof P.writeClipboard === "function") {
+        try {
+          if (await P.writeClipboard(text)) return true;
+        } catch {
+          /* fall through to the next mechanism */
+        }
+      }
+      const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+      if (clipboard !== undefined && typeof clipboard.writeText === "function") {
+        try {
+          await clipboard.writeText(text);
+          return true;
+        } catch {
+          /* fall through to the scratch textarea */
+        }
+      }
+      return legacyCopy(text);
+    }
+
+    /**
+     * The quick-command dialog: a left nav over one shared library. "View"
+     * lists the commands grouped by group with a run button and a copy button
+     * each; "Add" lists the same groups for picking a command to edit and
+     * carries the four fields plus Add and Save; "Backup" holds one export and
+     * one import button. The dialog owns only view state — every mutation goes
+     * through `quickStore`, so both panes always show the same library.
+     *
+     * `runCommand` sends one command into the panel's active terminal and is
+     * absent when the dialog is rendered outside a terminal surface.
+     */
+    function QuickCommandsDialog({ open, onClose, t, runCommand }) {
+      const items = useQuickCommands();
+      const [pane, setPane] = React.useState("view");
+      const [collapsed, setCollapsed] = React.useState([]);
+      const [editing, setEditing] = React.useState(null);
+      const [draft, setDraft] = React.useState(EMPTY_DRAFT);
+      const [copied, setCopied] = React.useState(null);
+      const [notice, setNotice] = React.useState(null);
+      const noticeSeq = React.useRef(0);
+      const fileRef = React.useRef(null);
+
+      const groups = React.useMemo(() => groupCommands(items), [items]);
+      const groupNames = React.useMemo(() => [...new Set(items.map((item) => item.group).filter((name) => name !== ""))], [items]);
+
+      /** Show one transient line beside the form actions. */
+      const announce = React.useCallback((text) => {
+        noticeSeq.current += 1;
+        const seq = noticeSeq.current;
+        setNotice({ id: seq, text });
+        window.setTimeout(() => {
+          setNotice((current) => (current !== null && current.id === seq ? null : current));
+        }, 2400);
+      }, []);
+
+      const toggleGroup = React.useCallback((key) => {
+        setCollapsed((prev) => (prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]));
+      }, []);
+
+      const onCopy = React.useCallback(async (item) => {
+        if ((await copyText(item.command)) === true) {
+          setCopied(item.id);
+          window.setTimeout(() => {
+            setCopied((current) => (current === item.id ? null : current));
+          }, 1600);
+          return;
+        }
+        announce(t("qc.copyFailed"));
+      }, [announce, t]);
+
+      /**
+       * Send one command into the terminal the panel is showing. A shell needs
+       * the trailing newline to run it, and multi-line commands are sent as
+       * typed — that is what "run it in this terminal" means.
+       */
+      const onRun = React.useCallback((item) => {
+        const outcome = runCommand === undefined ? undefined : runCommand(item.command);
+        if (outcome === undefined || outcome.ok !== true) {
+          announce(outcome !== undefined && outcome.reason === "no-seat" ? t("qc.runNoTerminal") : t("qc.runNotReady"));
+          return;
+        }
+        announce(t("qc.ran", { name: item.name }));
+      }, [announce, runCommand, t]);
+
+      /** Export the whole library as one JSON file. */
+      const onBackup = React.useCallback(() => {
+        const payload = commandDocument(items);
+        try {
+          const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = backupFileName();
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+        } catch {
+          announce(t("qc.backupFailed"));
+          return;
+        }
+        announce(t("qc.backedUp", { count: String(items.length) }));
+      }, [announce, items, t]);
+
+      const onRestorePick = React.useCallback(() => {
+        const field = fileRef.current;
+        if (field !== null) field.click();
+      }, []);
+
+      /** Import one backup file, replacing the library after a confirmation. */
+      const onRestoreFile = React.useCallback(async (event) => {
+        const field = event.target;
+        const file = field.files !== null && field.files !== undefined && field.files.length > 0 ? field.files[0] : undefined;
+        // Clear the field so picking the same file twice still fires a change.
+        field.value = "";
+        if (file === undefined) return;
+        let text;
+        try {
+          text = await file.text();
+        } catch {
+          announce(t("qc.restoreFailed"));
+          return;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          announce(t("qc.restoreFailed"));
+          return;
+        }
+        const commands = readCommandList(parsed);
+        if (commands === null) {
+          announce(t("qc.restoreFailed"));
+          return;
+        }
+        if (commands.length === 0) {
+          announce(t("qc.restoreEmpty"));
+          return;
+        }
+        if (window.confirm(t("qc.restoreConfirm", { count: String(commands.length) })) !== true) return;
+        quickStore.replaceAll(commands);
+        announce(t("qc.restored", { count: String(commands.length) }));
+      }, [announce, t]);
+
+      const changeField = React.useCallback((key, value) => {
+        setDraft((current) => ({ ...current, [key]: value }));
+      }, []);
+
+      /** Load one command into the fields for editing. */
+      const startEdit = React.useCallback((item) => {
+        setNotice(null);
+        setEditing(item.id);
+        setDraft({ name: item.name, group: item.group, note: item.note, command: item.command });
+      }, []);
+
+      /** Leave edit mode and clear the fields for a fresh command. */
+      const startNew = React.useCallback(() => {
+        setNotice(null);
+        setEditing(null);
+        setDraft(EMPTY_DRAFT);
+      }, []);
+
+      const onAdd = React.useCallback(() => {
+        if (draft.name.trim() === "" || draft.command.trim() === "") {
+          announce(t("qc.needFields"));
+          return;
+        }
+        const created = quickStore.add(draft);
+        setEditing(created.id);
+        setDraft({ name: created.name, group: created.group, note: created.note, command: created.command });
+        announce(t("qc.added"));
+      }, [announce, draft, t]);
+
+      const onSave = React.useCallback(() => {
+        if (editing === null) {
+          announce(t("qc.needSelection"));
+          return;
+        }
+        if (draft.name.trim() === "" || draft.command.trim() === "") {
+          announce(t("qc.needFields"));
+          return;
+        }
+        const saved = quickStore.update(editing, draft);
+        if (saved === undefined) {
+          setEditing(null);
+          announce(t("qc.gone"));
+          return;
+        }
+        setDraft({ name: saved.name, group: saved.group, note: saved.note, command: saved.command });
+        announce(t("qc.saved"));
+      }, [announce, draft, editing, t]);
+
+      /** One text field, single-line except for the command itself. */
+      const textField = (key, label, placeholder, multiline) => jsxs("label", {
+        className: "dse-qcField",
+        key,
+        children: [
+          jsx("span", { className: "dse-qcLabel", children: label }),
+          multiline
+            ? jsx("textarea", {
+                className: "dse-qcInput dse-qcTextarea",
+                rows: 3,
+                value: draft[key],
+                placeholder,
+                spellCheck: false,
+                "aria-label": label,
+                "data-qc-field": key,
+                onChange: (event) => changeField(key, event.target.value),
+              })
+            : jsx("input", {
+                className: "dse-qcInput",
+                type: "text",
+                value: draft[key],
+                placeholder,
+                spellCheck: false,
+                autoComplete: "off",
+                list: key === "group" ? QUICK_GROUP_LIST_ID : undefined,
+                "aria-label": label,
+                "data-qc-field": key,
+                onChange: (event) => changeField(key, event.target.value),
+              }),
+        ],
+      });
+
+      /**
+       * The grouped command list both panes render. `mode` decides what a
+       * command name does: view mode only copies through its own button, add
+       * mode selects the command into the form below.
+       */
+      const renderGroups = (mode) => {
+        if (groups.length === 0) {
+          return jsx("p", { className: "dse-qcEmpty", children: t("qc.empty") });
+        }
+        return groups.map((group) => {
+          const isCollapsed = collapsed.includes(group.key);
+          return jsxs("div", {
+            className: "dse-qcGroup",
+            key: group.key === "" ? "::ungrouped" : group.key,
+            children: [
+              jsxs("button", {
+                type: "button",
+                className: "dse-qcGroupHead",
+                "aria-expanded": isCollapsed !== true,
+                onClick: () => toggleGroup(group.key),
+                children: [
+                  isCollapsed
+                    ? jsx(P.IconChevronRightOutlineRegular, { key: "chevron" })
+                    : jsx(P.IconChevronDownOutlineRegular, { key: "chevron" }),
+                  jsx("span", { className: "dse-qcGroupName", children: group.key === "" ? t("qc.ungrouped") : group.key, key: "name" }),
+                  jsx("span", { className: "dse-qcCount", children: String(group.commands.length), key: "count" }),
+                ],
+              }),
+              isCollapsed ? null : jsx("ul", {
+                className: "dse-qcList",
+                children: group.commands.map((item) => jsxs("li", {
+                  className: "dse-qcRow",
+                  "data-qc-row": item.id,
+                  "data-selected": mode === "add" && item.id === editing,
+                  title: (item.note === "" ? "" : `${item.note}\n`) + item.command,
+                  children: [
+                    mode === "add"
+                      ? jsx("button", {
+                          type: "button",
+                          className: "dse-qcName",
+                          "data-qc-pick": item.id,
+                          onClick: () => startEdit(item),
+                          children: item.name,
+                        })
+                      : jsx("span", { className: "dse-qcName", children: item.name }),
+                    mode === "view" && runCommand !== undefined
+                      ? jsx("button", {
+                          type: "button",
+                          className: "dse-qcRun",
+                          "data-qc-run": item.id,
+                          title: t("qc.run"),
+                          "aria-label": t("qc.runNamed", { name: item.name }),
+                          onClick: () => onRun(item),
+                          children: jsx(P.IconPlayOutlineRegular, {}),
+                        })
+                      : null,
+                    jsx("button", {
+                      type: "button",
+                      className: "dse-qcCopy",
+                      "data-copied": copied === item.id,
+                      "data-qc-copy": item.id,
+                      title: t("qc.copy"),
+                      "aria-label": t("qc.copyNamed", { name: item.name }),
+                      onClick: () => void onCopy(item),
+                      children: copied === item.id
+                        ? jsx(P.IconCheckOutlineRegular, {})
+                        : jsx(P.IconCopyOutlineRegular, {}),
+                    }),
+                  ],
+                }, item.id)),
+              }),
+            ],
+          });
+        });
+      };
+
+      return jsx(P.Modal, {
+        open,
+        onClose,
+        title: t("qc.title"),
+        closeLabel: t("banner.dismiss"),
+        className: "dse-qcDialog",
+        contentClassName: "dse-qcContent",
+        children: jsxs("div", {
+          className: "dse-qcLayout",
+          children: [
+            jsxs("nav", {
+              className: "dse-qcNav",
+              "aria-label": t("qc.title"),
+              children: [
+                jsx("button", {
+                  type: "button",
+                  className: "dse-qcNavItem",
+                  "data-qc-nav": "view",
+                  "data-active": pane === "view",
+                  "aria-current": pane === "view",
+                  onClick: () => setPane("view"),
+                  children: t("qc.navView"),
+                }),
+                jsx("button", {
+                  type: "button",
+                  className: "dse-qcNavItem",
+                  "data-qc-nav": "add",
+                  "data-active": pane === "add",
+                  "aria-current": pane === "add",
+                  onClick: () => setPane("add"),
+                  children: t("qc.navAdd"),
+                }),
+                jsx("button", {
+                  type: "button",
+                  className: "dse-qcNavItem",
+                  "data-qc-nav": "io",
+                  "data-active": pane === "io",
+                  "aria-current": pane === "io",
+                  onClick: () => setPane("io"),
+                  children: t("qc.navIo"),
+                }),
+              ],
+            }),
+            pane === "view"
+              ? jsx("div", {
+                  className: "dse-qcPane",
+                  "data-pane": "view",
+                  children: jsxs("div", {
+                    className: "dse-qcScroll",
+                    children: [
+                      quickStore.source === "unavailable"
+                        ? jsx("p", { className: "dse-qcWarn", role: "status", children: t("qc.ioWarn") })
+                        : null,
+                      renderGroups("view"),
+                    ],
+                  }),
+                })
+              : pane === "io"
+              ? jsxs("div", {
+                  className: "dse-qcPane",
+                  "data-pane": "io",
+                  children: [
+                    jsxs("div", {
+                      className: "dse-qcIo",
+                      children: [
+                        jsx("p", {
+                          className: "dse-qcIoHint",
+                          children: t("qc.ioHint", {
+                            path: quickStore.hostPath === "" ? t("qc.ioPathUnknown") : quickStore.hostPath,
+                          }),
+                        }),
+                        jsxs("div", {
+                          className: "dse-qcActions",
+                          children: [
+                            jsx(P.Button, {
+                              type: "button",
+                              variant: "outline",
+                              size: "sm",
+                              "data-qc-backup": true,
+                              onClick: onBackup,
+                              children: t("qc.backup"),
+                            }),
+                            jsx(P.Button, {
+                              type: "button",
+                              variant: "outline",
+                              size: "sm",
+                              "data-qc-restore": true,
+                              onClick: onRestorePick,
+                              children: t("qc.restore"),
+                            }),
+                            jsx("input", {
+                              ref: fileRef,
+                              type: "file",
+                              accept: ".json,application/json",
+                              className: "dse-qcFile",
+                              "data-qc-file": true,
+                              onChange: (event) => void onRestoreFile(event),
+                            }),
+                          ],
+                        }),
+                        jsx("p", {
+                          className: "dse-qcIoState",
+                          "data-qc-io-state": quickStore.source,
+                          role: "status",
+                          children: t(`qc.ioState.${quickStore.source}`),
+                        }),
+                        jsx("p", { className: "dse-qcIoNote", children: t("qc.ioNote", { count: String(items.length) }) }),
+                        notice === null ? null : jsx("span", { className: "dse-qcNotice", role: "status", children: notice.text }),
+                      ],
+                    }),
+                  ],
+                })
+              : jsxs("div", {
+                  className: "dse-qcPane",
+                  "data-pane": "add",
+                  children: [
+                    jsx("div", { className: "dse-qcScroll", "data-qc-list": true, children: renderGroups("add") }),
+                    jsxs("div", {
+                      className: "dse-qcForm",
+                      children: [
+                        jsxs("div", {
+                          className: "dse-qcFormHead",
+                          children: [
+                            jsx("span", {
+                              className: "dse-qcFormTitle",
+                              "data-qc-editing": editing === null ? "" : editing,
+                              children: editing === null
+                                ? t("qc.newCommand")
+                                : t("qc.editing", { name: draft.name === "" ? t("qc.untitled") : draft.name }),
+                            }),
+                            editing === null ? null : jsx("button", {
+                              type: "button",
+                              className: "dse-qcLink",
+                              onClick: startNew,
+                              children: t("qc.newCommand"),
+                            }),
+                          ],
+                        }),
+                        textField("name", t("qc.fieldName"), t("qc.namePlaceholder"), false),
+                        textField("group", t("qc.fieldGroup"), t("qc.groupPlaceholder"), false),
+                        textField("note", t("qc.fieldNote"), t("qc.notePlaceholder"), false),
+                        textField("command", t("qc.fieldCommand"), t("qc.commandPlaceholder"), true),
+                        jsx("datalist", {
+                          id: QUICK_GROUP_LIST_ID,
+                          children: groupNames.map((name) => jsx("option", { value: name, key: name })),
+                        }),
+                        jsxs("div", {
+                          className: "dse-qcActions",
+                          children: [
+                            jsx(P.Button, {
+                              type: "button",
+                              variant: "outline",
+                              size: "sm",
+                              "data-qc-add": true,
+                              onClick: onAdd,
+                              children: t("qc.add"),
+                            }),
+                            jsx(P.Button, {
+                              type: "button",
+                              variant: "primary",
+                              size: "sm",
+                              "data-qc-save": true,
+                              disabled: editing === null,
+                              onClick: onSave,
+                              children: t("qc.save"),
+                            }),
+                            notice === null ? null : jsx("span", { className: "dse-qcNotice", role: "status", children: notice.text }),
+                          ],
+                        }),
+                      ],
+                    }),
+                  ],
+                }),
+          ],
+        }),
+      });
+    }
+
+    //#endregion
+
     //#region bottom terminal panel
 
     /**
@@ -2173,6 +3285,7 @@ window.__ModuleLoader__.load({
         const height = usePanelHeight();
         const active = usePanelActive();
         const seats = usePanelSeats();
+        const [quickOpen, setQuickOpen] = React.useState(false);
         const helpers = helpersOf(sessionId);
         const activeKey = seats.some((seat) => seat.key === active)
           ? active
@@ -2181,6 +3294,28 @@ window.__ModuleLoader__.load({
         // this render, so the click's result appears on the very next paint.
         if (activeKey !== undefined && activeKey !== panelStore.active) panelStore.setActive(activeKey);
         const activeSeat = seats.find((seat) => seat.key === activeKey);
+
+        /**
+         * Type a quick command into the terminal the panel is showing. The
+         * trailing newline is what makes the shell run it. A command is only
+         * accepted once the terminal is connected and writable, so the dialog
+         * can say why nothing happened instead of dropping it silently.
+         */
+        const runCommand = React.useCallback((command) => {
+          const target = seats.find((seat) => seat.key === activeKey);
+          if (target === undefined) return { ok: false, reason: "no-seat" };
+          try {
+            const view = helpers.view(target.key);
+            const state = view.state.getSnapshot();
+            if (state === undefined || state.writable !== true || state.phase !== "connected") {
+              return { ok: false, reason: "not-ready" };
+            }
+            view.write(`${command}\n`);
+            return { ok: true };
+          } catch {
+            return { ok: false, reason: "not-ready" };
+          }
+        }, [activeKey, helpers, seats]);
         // Two distinct fixes:
         // 1) The effect fires on EVERY session change (the store is module
         //    level), so a second session's auto-seed previously raced the
@@ -2278,6 +3413,15 @@ window.__ModuleLoader__.load({
                   className: "dse-panelActions",
                   children: [
                     jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.newTerminal"), "aria-label": t("tool.newTerminal"), onClick: onNew, children: jsx(P.IconPlusOutlineRegular, {}) }),
+                    jsx("button", {
+                      className: "dse-tbarBtn",
+                      type: "button",
+                      title: t("qc.button"),
+                      "aria-label": t("qc.button"),
+                      "data-qc-open": true,
+                      onClick: () => setQuickOpen(true),
+                      children: jsx(P.IconListPenOutlineRegular, {}),
+                    }),
                     jsx("button", { className: "dse-tbarBtn", type: "button", title: t("panel.hide"), "aria-label": t("panel.hide"), onClick: onHide, children: jsx(IconChevronDownSolid, {}) }),
                   ],
                 }),
@@ -2297,6 +3441,9 @@ window.__ModuleLoader__.load({
                 helpersFor: helpersOf,
               }),
             }),
+            // The quick-command dialog portals itself to `document.body`, so it
+            // does not affect the panel's own layout; it unmounts with the panel.
+            jsx(QuickCommandsDialog, { key: "quick", open: quickOpen, onClose: () => setQuickOpen(false), t, runCommand }),
           ],
         });
       }
