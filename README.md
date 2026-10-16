@@ -25,11 +25,11 @@ An enhanced sidebar plugin for DeepSeek Harness: full file-management operations
 - 读取期间文件被外部修改的变更提示 / External-change notice during load
 - 大小写不敏感的扩展名匹配，内置渲染器（Markdown/HTML/SVG 等）仍可在切换器中选择
 
-**终端停靠 / Terminal dock**（复用内置终端，不改动其注册）
+**下侧终端面板 / Bottom terminal panel**（复用内置终端内核，不改动其注册）
 
-- 终端面板工具栏一键停靠到会话输入框下方 / One click docks the terminal below the conversation composer
-- 顶缘拖拽调节高度（160px – 70% 视口），模式与高度持久化 / Drag the top edge to resize; mode and height persist in localStorage
-- 随时可移回侧边栏，切换期间终端进程与画面保持 / Move back to the sidebar anytime — the terminal process and screen survive the switch
+- 会话头部新增终端按钮，点击在输入框下方弹出独立面板，再点收起 / A terminal button in the session header shows/hides an independent panel below the composer
+- 面板支持多标签，**完全独立于右侧边栏**：底部开的终端不会出现在侧边栏，反之亦然 / Multi-tab panel, fully independent of the right sidebar — neither side sees the other's terminals
+- 面板内 + 新建终端、× 关闭标签（进程一并结束）、顶缘拖拽调高（160px – 70% 视口），显隐与高度持久化 / + opens a terminal, × closes a tab and its process, drag the top edge to resize; all state persists
 
 ## 安装 / Install
 
@@ -63,14 +63,14 @@ dsh plugin --profile web remove dsh-sidebar-enhancement
 - **Host 半部**（`index.js`）向 DSH 内置 web 服务器注册 6 条路由（`/sidebar-enhancer/{save,create,mkdir,rename,remove,upload}`），全部经过连接信任围栏、有界请求体、`typert` 会话工作区根解析与路径包含检查；文件读写经由 `ctx.fs`（乐观锁 `writeText`），目录操作走 `node:fs/promises`。
 - **Client 半部**（`client.js`）以 `priority: -1` 影子替换内置文件面板 Slot，并向 `documentPreviews` 注册 `priority: 'extension'` 的渲染器定义与对应文档 Slot。读取走内置 `workspaceFiles` Remote（分页 1 基行号），写入走上述 Host 路由。
 - 预览渲染遵循 `DocumentContent` 契约：加载完成后上报 `content.loaded(version)`，外部变更通过 `content.revision` 感知。
-- **终端停靠**：以 `priority: -1` 影子替换内置终端面板 Slot，同时向 `conversation.composer.dock` 注册停靠条目；两侧共享同一模式存储，任意时刻只有一侧挂载终端。终端本体直接复用内置懒加载分块（`client.terminal.js`，含 xterm）中的 `TerminalBody` 组件与 `webTerminals` 视图模型，不重复实现终端。
+- **下侧终端面板**：向 `conversation.composer.dock` 注册多标签面板条目，并向 `conversation.session.header.utilities` 注册头部按钮。面板拥有自己的终端 seat 台账（`panelSeats`）：每个 seat 合成唯一 content identity，直接向 `ctx.webTerminals.view()` 取视图并 `refresh()` 分配新终端；关闭走控制器自己的 `ctx.webTerminals.close(sessionId, key, contentId, terminalId)`（记录关闭意图、清掉绑定与视图、后台结束进程且失败可重试）。不直接调 `view.close()`：它只杀进程，控制器账本仍占着会话终端名额，连续开关后会撞上「终端数量已达上限」。不读取、不写入侧边栏标签清单（`openTabs`/`openTabIn`/`closeIn`），因此与右侧边栏终端完全互不干扰。终端渲染复用内置懒加载分块（`client.terminal.js`，含 xterm）中的 `TerminalBody` 组件与 `webTerminals` 视图模型，不重复实现终端。
 
 ## 兼容性 / Compatibility
 
 - 仅支持会话工作区内的文件（session workspace scope），跨会话与绝对地址不受影响。
 - 二进制文件、超大文本（读取上限 6M 字符）不进入编辑器，回落内置行为。
 - 目录监视（watch）暂未实现：变更通过手动刷新与操作后自动重列感知。
-- 终端停靠依赖内置终端面板包（随插件引导注入），若宿主缺失相关服务则自动跳过该功能。
+- 下侧终端面板依赖内置终端面板包与会话面板（随插件引导注入），若宿主缺失相关服务则自动跳过该功能。
 
 ## License
 

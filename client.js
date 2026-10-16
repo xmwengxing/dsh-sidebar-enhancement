@@ -39,10 +39,12 @@ window.__ModuleLoader__.load({
     const TERMINAL_ID = "@deepseek-ai/dsh-client-ui-sidebar-terminal";
     /** The terminal package's lazy chunk that owns xterm and `TerminalBody`. */
     const TERMINAL_CHUNK = "client.terminal.js";
-    /** The composer-dock entry identity (`conversation.composer.dock` is a list slot). */
-    const DOCK_ID = "dsh-sidebar-enhancement/terminal-dock";
-    /** localStorage key persisting the dock mode and height. */
-    const DOCK_STORE_KEY = "dsh-sidebar-enhancement.terminalDock";
+    /** The bottom panel entry identity (`conversation.composer.dock` is a list slot). */
+    const DOCK_ID = "dsh-sidebar-enhancement/terminal-panel";
+    /** The header button identity (`conversation.session.header.utilities` is a list slot). */
+    const PANEL_BUTTON_ID = "dsh-sidebar-enhancement/terminal-panel-button";
+    /** localStorage key persisting the panel visibility and height. */
+    const DOCK_STORE_KEY = "dsh-sidebar-enhancement.terminalPanel";
 
     /** Host mutation routes registered by this bundle's host half. */
     const ROUTES = {
@@ -354,78 +356,7 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
-    //#region terminal dock: state store, chunk loader, hook bindings
-
-    /**
-     * Dock state shared by the sidebar shadow body and the composer dock, so
-     * exactly one side mounts the terminal at any time. `mode` picks the seat;
-     * `height` is the docked height in pixels.
-     */
-    const dockStore = {
-      mode: "right",
-      height: 300,
-      listeners: new Set(),
-      restore() {
-        try {
-          const raw = window.localStorage.getItem(DOCK_STORE_KEY);
-          if (typeof raw === "string" && raw !== "") {
-            const saved = JSON.parse(raw);
-            if (saved?.mode === "bottom" || saved?.mode === "right") this.mode = saved.mode;
-            if (typeof saved?.height === "number" && Number.isFinite(saved.height)) this.height = saved.height;
-          }
-        } catch {
-          // Private-browsing or corrupt state: keep the defaults.
-        }
-      },
-      persist() {
-        try {
-          window.localStorage.setItem(DOCK_STORE_KEY, JSON.stringify({ mode: this.mode, height: this.height }));
-        } catch {
-          // Storage unavailable: the choice lives for this page only.
-        }
-      },
-      setMode(mode) {
-        if (this.mode === mode) return;
-        this.mode = mode;
-        this.persist();
-        for (const listener of this.listeners) listener();
-      },
-      setHeight(height) {
-        const clamped = Math.max(160, Math.min(Math.round(window.innerHeight * 0.7), Math.round(height)));
-        if (this.height === clamped) return;
-        this.height = clamped;
-        this.persist();
-        for (const listener of this.listeners) listener();
-      },
-      subscribe(listener) {
-        this.listeners.add(listener);
-        return () => {
-          this.listeners.delete(listener);
-        };
-      },
-    };
-    if (typeof window !== "undefined") dockStore.restore();
-
-    /**
-     * Dock diagnostics: the sidebar placeholder surfaces these so a failed
-     * registration or a crashed dock render is visible without devtools.
-     */
-    const dockProbe = { registered: false, error: "", renderError: "", lastBlock: "", terminalTabCount: -1, mounted: false };
-    /** The sidebar-side session id, reported by the shadow body (authoritative for tabDomain/webTerminals). */
-    const dockSession = { sidebarSessionId: undefined };
-
-    /** Stable subscription binding for React external stores. */
-    const subscribeDock = (listener) => dockStore.subscribe(listener);
-
-    /** Reactive `dockStore.mode` for components. */
-    function useDockMode() {
-      return React.useSyncExternalStore(subscribeDock, () => dockStore.mode);
-    }
-
-    /** Reactive `dockStore.height` (px) for the docked pane. */
-    function useDockHeight() {
-      return React.useSyncExternalStore(subscribeDock, () => dockStore.height);
-    }
+    //#region terminal dock: chunk loader, hook bindings
 
     /**
      * Load the terminal package's lazy chunk (`TerminalBody` + bundled xterm)
@@ -548,39 +479,37 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Terminal model plumbing, copied from the built-in registration: resolve
-     * the sidebar occurrence for (session, tab key), then ask the terminal
-     * controller for its retained view. Guards turn a vanished occurrence into
-     * an absent view instead of a render-time throw.
+     * Terminal model plumbing for the panel's own seats. Unlike the built-in
+     * registration, the panel needs no sidebar occurrence: it synthesizes a
+     * unique content identity per seat and lets the controller allocate a
+     * fresh Host terminal (`view()` is idempotent per key; a brand-new key
+     * with no saved terminalId means "create"). This keeps the panel fully
+     * independent of the sidebar layout — the sidebar never sees these tabs.
+     *
+     * Content identity: a seat must NOT keep a fixed `contentId`, because
+     * `webTerminals` caches its bindings by `(sessionId, contentId)`. Once the
+     * controller has seen one identity, re-asking for the same identity after
+     * the Host terminal is gone returns the OLD terminalId — `view()` then
+     * restores with `createWhenMissing=false` and the built-in body renders
+     * "此终端已不存在" with a non-working new-terminal button (its button
+     * calls the sidebar's `openTab`, which the panel stubs out). So every
+     * lookup mints a fresh identity: a re-created seat gets a new terminal.
      */
-    function makeTerminalHelpers(ctx, sessionId) {
-      const occurrenceOf = (key) => ctx.sidebarRight.tabDomain.occurrence(sessionId, { id: key });
-      const paramsOf = (key) => {
-        try {
-          return occurrenceOf(key).navigation.getSnapshot().params;
-        } catch {
-          return undefined;
-        }
-      };
-      const terminalIdOf = (key) => {
-        const params = paramsOf(key);
-        return params !== undefined && "terminalId" in params ? params.terminalId : undefined;
-      };
+    function makePanelHelpers(ctx, sessionId) {
       const view = (key) => {
-        try {
-          const occurrence = occurrenceOf(key);
-          const params = occurrence.navigation.getSnapshot().params;
-          const contentId = occurrence.navigation.getSnapshot().address;
-          return ctx.webTerminals.view(
-            sessionId,
-            key,
-            contentId,
-            terminalIdOf(key),
-            params !== undefined && "shellPath" in params ? params.shellPath : undefined,
-          );
-        } catch {
-          return absentView;
+        const seat = panelSeats.items.find((item) => item.key === key);
+        if (seat === undefined) return absentView;
+        if (seat.contentId === undefined) {
+          // Defensive: seats normally mint their identity at creation time.
+          seat.contentId = mintSeatContentId(sessionId, key);
         }
+        return ctx.webTerminals.view(
+          sessionId,
+          key,
+          seat.contentId,
+          seat.terminalId,
+          seat.shellPath,
+        );
       };
       const stateHook = keyedSelectorHookFor((key) => {
         try {
@@ -589,7 +518,28 @@ window.__ModuleLoader__.load({
           return undefined;
         }
       });
-      return { view, stateHook, paramsOf };
+      /** Close the seat's process and forget the seat entirely. */
+      const close = (key) => {
+        const seat = panelSeats.items.find((item) => item.key === key);
+        panelSeats.remove(key);
+        // The panel render reconciles `panelStore.active` on the spot: when
+        // the closed seat was active it falls back to the remaining tab, so
+        // there is no window with no live seat (which would strand the
+        // pointer and make later clicks inert).
+        if (panelStore.active === key) panelStore.setActive(undefined);
+        if (seat === undefined) return;
+        // The controller is the only owner of close bookkeeping: `close()`
+        // records the intent, deletes the (session, contentId) binding and
+        // the view, then runs the Host close out of band — surviving DOM
+        // unmount and reload, and retrying itself on failure. Calling
+        // `view.close()` directly instead would kill the Host process while
+        // the controller still counted the seat among the session's
+        // terminals, so the per-session limit (8) would fill with phantom
+        // terminals and every later seat would fail with
+        // "terminal/limit-reached" (which is what the user saw).
+        ctx.webTerminals.close(sessionId, key, seat.contentId, seat.terminalId);
+      };
+      return { view, stateHook, close };
     }
 
     /** A inert stand-in `TerminalView` used while an occurrence is vanishing. */
@@ -651,6 +601,7 @@ window.__ModuleLoader__.load({
 .dse-tool{width:28px;height:28px;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);cursor:pointer;background:0 0;border:none;flex:none;justify-content:center;align-items:center;padding:6px;line-height:1;display:inline-flex}
 .dse-tool svg{width:15px;height:15px}
 .dse-tool:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-tool[data-open=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}
 .dse-banner{box-sizing:border-box;flex:none;align-items:center;gap:10px;padding:6px 8px 6px 16px;font-size:12px;color:var(--dsw-alias-label-secondary);border-bottom:.5px solid var(--dsw-alias-border-l3);display:flex}
 .dse-banner[data-kind=error]{color:var(--dsw-alias-feedback-danger-fg,#e5484d)}
 .dse-bannerText{flex:1;min-width:0}
@@ -678,6 +629,8 @@ window.__ModuleLoader__.load({
 .dse-tbarBtn{width:26px;height:26px;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);cursor:pointer;background:0 0;border:none;flex:none;justify-content:center;align-items:center;padding:5px;line-height:1;display:inline-flex}
 .dse-tbarBtn svg{width:15px;height:15px}
 .dse-tbarBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+/* The tab's close button must render on top of the tab, not inside it: a nested button inside a clickable tab is both invalid HTML and a hit-testing hazard (the parent's click swallows the child's). */
+.dse-panelTabClose{position:absolute;top:50%;right:2px;transform:translateY(-50%);width:20px;height:20px;flex:none;color:var(--dsw-alias-label-tertiary);background:0 0;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;justify-content:center;align-items:center;padding:3px;display:inline-flex}
 .dse-dock{flex:0 0 100%;min-width:100%;order:99;box-sizing:border-box;flex-direction:column;border-top:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-surface-base,transparent);display:flex}
 /* The built-in composer dock row must wrap so the terminal gets its own full-width line (pills stay on the first line). Scoped to the hashed InputBar dock class of the current DSH build. */
 .uV2eYG_dock{flex-wrap:wrap}
@@ -685,7 +638,19 @@ window.__ModuleLoader__.load({
 .dse-dockGrip:hover{background:var(--dsw-alias-border-strong,rgba(127,156,245,.35))}
 .dse-dockBody{flex:1;min-height:0;position:relative}
 .dse-dockPh{height:100%;justify-content:center;align-items:center;flex-direction:column;gap:8px;color:var(--dsw-alias-label-tertiary);font-size:12px;display:flex}
-.dse-dockProbe{flex:none;max-width:100%;color:var(--dsw-alias-label-tertiary);font-size:11px;text-align:center;word-break:break-all;padding:0 12px;opacity:.9}
+/* The bottom terminal panel's tab strip: a VS-Code-like row above the terminal. */
+.dse-panelBar{flex:none;box-sizing:border-box;align-items:center;gap:8px;min-height:30px;padding:0 6px;border-bottom:.5px solid var(--dsw-alias-border-l3);font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-secondary);display:flex}
+.dse-panelTabs{flex:1 1 auto;min-width:0;align-items:center;gap:2px;overflow-x:auto;display:flex;scrollbar-width:thin}
+/* One panel tab wrapper: the pill + its overlay close button. The wrapper is only a positioning context, so the pill's hover/active styles apply to the inner button and the x sits outside it. */
+.dse-panelTabWrap{position:relative;flex:0 0 auto;display:flex}
+.dse-panelTab{flex:0 0 auto;width:auto;max-width:200px;min-width:96px;align-items:center;gap:2px;padding:0 22px 0 10px;height:24px;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;white-space:nowrap;color:inherit;background:0 0;font:inherit;display:flex}
+.dse-panelTab:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dse-panelTabWrap[data-active=true] .dse-panelTab{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}
+.dse-panelTabLabel{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 2px;line-height:1.4}
+.dse-panelTabClose svg{width:12px;height:12px}
+.dse-panelTabClose:hover{color:var(--dsw-alias-feedback-danger-fg,#e5484d);background:var(--dsw-alias-interactive-bg-hover)}
+.dse-panelActions{flex:none;align-items:center;gap:2px;display:flex}
+.dse-panelEmpty{align-self:center;color:var(--dsw-alias-label-tertiary);padding:0 6px}
 `;
 
     /** Inject the stylesheet once; returns its disposer for `ctx.effect`. */
@@ -774,17 +739,13 @@ window.__ModuleLoader__.load({
       "editor.saveFailed": "保存失败：{message}",
       "editor.loadFailed": "读取失败：{message}",
       "editor.hint": "Ctrl+S 保存",
-      "tool.dock": "停靠到输入框下方",
-      "tool.restore": "移回侧边栏",
-      "dock.placeholder": "终端已停靠到输入框下方",
-      "dock.open": "打开终端",
+      "tool.terminal": "终端面板",
+      "panel.hide": "隐藏终端面板",
+      "panel.empty": "还没有终端，点右侧 + 新建",
+      "panel.tab": "终端",
+      "tool.newTerminal": "新建终端",
       "dock.loading": "正在载入终端…",
-      "dock.failed": "终端组件载入失败，可点击右侧按钮重试",
-      "dock.probeOk": "停靠诊断：条目已注册并正常渲染",
-      "dock.probeNotMounted": "停靠诊断：条目已注册但停靠区未挂载",
-      "dock.probePending": "停靠诊断：条目尚未注册（仍在等待输入框下方槽位声明）",
-      "dock.probeRegFail": "停靠诊断：条目注册失败",
-      "dock.probeRenderFail": "停靠诊断：停靠区渲染失败",
+      "dock.failed": "终端组件载入失败，请刷新页面重试",
     };
 
     const en = {
@@ -852,17 +813,13 @@ window.__ModuleLoader__.load({
       "editor.saveFailed": "Saving failed: {message}",
       "editor.loadFailed": "Reading failed: {message}",
       "editor.hint": "Ctrl+S to save",
-      "tool.dock": "Dock below the composer",
-      "tool.restore": "Move back to the sidebar",
-      "dock.placeholder": "The terminal is docked below the composer",
-      "dock.open": "Open a terminal",
+      "tool.terminal": "Terminal panel",
+      "panel.hide": "Hide the terminal panel",
+      "panel.empty": "No terminals yet — use + to open one",
+      "panel.tab": "Terminal",
+      "tool.newTerminal": "New terminal",
       "dock.loading": "Loading the terminal…",
-      "dock.failed": "Loading the terminal component failed — retry with the button",
-      "dock.probeOk": "Dock probe: entry registered and rendering",
-      "dock.probeNotMounted": "Dock probe: entry registered but the dock is not mounted",
-      "dock.probePending": "Dock probe: entry not registered yet (still waiting for the composer-dock slot declaration)",
-      "dock.probeRegFail": "Dock probe: entry registration failed",
-      "dock.probeRenderFail": "Dock probe: dock render failed",
+      "dock.failed": "Loading the terminal component failed — refresh to retry",
     };
 
     //#endregion
@@ -896,7 +853,7 @@ window.__ModuleLoader__.load({
       ],
     });
 
-    /** Dock-down: a pane sliding to the bottom edge (arrow into a tray). */
+    /** Dock-down glyph (kept for the header button's hover affordance). */
     const DockDownIcon = () => jsxs("svg", {
       viewBox: "0 0 16 16", width: 15, height: 15, fill: "none", stroke: "currentColor",
       strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
@@ -904,6 +861,23 @@ window.__ModuleLoader__.load({
         jsx("path", { d: "M2.6 9.6v2.2a1 1 0 0 0 1 1h8.8a1 1 0 0 0 1-1V9.6" }),
         jsx("path", { d: "M8 9.4V2.4M5.4 7 8 9.6 10.6 7" }),
       ],
+    });
+
+    /** A terminal window glyph for the header toggle. */
+    const TerminalGlyph = () => jsxs("svg", {
+      viewBox: "0 0 16 16", width: 15, height: 15, fill: "none", stroke: "currentColor",
+      strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
+      children: [
+        jsx("rect", { x: 1.8, y: 2.8, width: 12.4, height: 10.4, rx: 1.6 }),
+        jsx("path", { d: "M4.6 6.6 6.4 8.2 4.6 9.8" }),
+        jsx("path", { d: "M8.2 9.9h3.2" }),
+      ],
+    });
+
+    /** Chevron-down for the panel hide action. */
+    const IconChevronDownSolid = () => jsx("svg", {
+      viewBox: "0 0 16 16", width: 14, height: 14, fill: "currentColor", "aria-hidden": true,
+      children: [jsx("path", { d: "M3.2 5.9a1 1 0 0 1 1.6-.4L8 8.3l3.2-2.8a1 1 0 1 1 1.3 1.5l-4 3.4a1 1 0 0 1-1.3 0l-4-3.4a1 1 0 0 1-.4-1.1z" })],
     });
 
     /** Dock-right: a pane sliding to the right edge (arrow into a right gutter). */
@@ -1913,7 +1887,33 @@ window.__ModuleLoader__.load({
      * hook, the built-in terminal locale translator, and the per-session view
      * helpers. Assigned once in `apply` (single plugin instance).
      */
-    const terminalRuntime = { useTheme: undefined, tTerm: undefined, helpersFor: undefined };
+    const terminalRuntime = {
+      useTheme: undefined,
+      tTerm: undefined,
+    };
+
+    /**
+     * The panel's lazy chunk handle: the panel body starts loading when it
+     * mounts, the promise is cached (and re-armed on failure) so switching
+     * tabs never reloads it.
+     */
+    const terminalChunk = {
+      promise: undefined,
+      /** Start/load the chunk; returns a promise of `{ TerminalBody }`. */
+      load(require) {
+        if (this.promise === undefined) {
+          this.promise = ensureTerminalChunk(require).catch((error) => {
+            this.promise = undefined;
+            throw error;
+          });
+        }
+        return this.promise;
+      },
+      /** The cached promise, or `undefined` if loading never started. */
+      peek() {
+        return this.promise;
+      },
+    };
 
     /** Load the built-in terminal chunk once when enabled (`enabledKey > 0`).
      * Yields `undefined` while loading, `null` on failure (retry by bumping the
@@ -1942,8 +1942,15 @@ window.__ModuleLoader__.load({
 
     /**
      * Seat the built-in `TerminalBody` on my own inject bindings. The chunk
-     * component is a plain React component — it only consumes the props below
-     * (verified against the shipped chunk), so no slot machinery is involved.
+     * component is a plain React component whose props are exactly the five
+     * below (verified against the shipped chunk: it destructures
+     * `{ useTabInfo, useTerminal, useTheme, view, t }` and reads failure
+     * states from the observable itself), so no slot machinery is involved.
+     *
+     * The seat wrapper owns `model.mount()`: the body's own mount effect only
+     * runs once it renders, and it renders `null` before the first snapshot
+     * arrives, which would otherwise delay the allocation to an indeterminate
+     * point.
      */
     function BoundTerminalBody({ Body, helpers, useTheme, tTerm, tab }) {
       return jsx(Body, {
@@ -1955,132 +1962,259 @@ window.__ModuleLoader__.load({
       });
     }
 
+    //#endregion
+
+    //#region bottom terminal panel
+
     /**
-     * The shadow body for `sidebar.right.pane.tab` under the built-in
-     * terminal's key. In `right` mode it hosts the built-in terminal body
-     * under a slim toolbar with the dock toggle; in `bottom` mode the pane
-     * shows a placeholder and the composer dock owns the terminal.
+     * The panel's own terminal tabs, fully independent of the sidebar
+     * inventory: the panel owns seat lifecycle itself, so terminals opened
+     * here never appear in the right sidebar (and vice versa).
+     *
+     * A seat is `{key, terminalId?, shellPath?, contentId}`; the seat key is
+     * unique per panel tab and unrelated to any sidebar tab id. The terminal
+     * process is owned by the Host (`ctx.webTerminals`); closing a seat calls
+     * `view.close()` + `view.dispose()` directly, with no sidebar involvement.
      */
-    function SidebarTerminalShadowBody({ sessionId, useTabInfo, t }) {
-      if (typeof sessionId === "string") dockSession.sidebarSessionId = sessionId;
-      const mode = useDockMode();
-      const { tab } = useTabInfo();
+    const panelSeats = {
+      items: [],
+      nextKey: 0,
+      listeners: new Set(),
+      emit() {
+        for (const listener of this.listeners) listener();
+      },
+      subscribe(listener) {
+        this.listeners.add(listener);
+        return () => {
+          this.listeners.delete(listener);
+        };
+      },
+      getSnapshot() {
+        // The snapshot must be a STABLE array reference between mutations:
+        // React bails out of re-rendering when `useSyncExternalStore`'s
+        // getSnapshot returns an identical value, and re-creating it on every
+        // call made every unrelated panel render (height, open) rebuild the
+        // seat list and unmount/remount the active terminal — losing its
+        // scrollback and, worse, resurrecting a terminal whose Host process
+        // had closed.
+        return this.items;
+      },
+      add(seat) {
+        this.items = [...this.items, seat];
+        this.emit();
+      },
+      remove(key) {
+        this.items = this.items.filter((seat) => seat.key !== key);
+        this.emit();
+      },
+    };
+
+    /** The panel's own seats, reactive (omit when the panel is closed). */
+    function usePanelSeats() {
+      return React.useSyncExternalStore(
+        (listener) => panelSeats.subscribe(listener),
+        () => panelSeats.getSnapshot(),
+      );
+    }
+    const panelStore = {
+      open: false,
+      active: undefined,
+      height: 300,
+      listeners: new Set(),
+      restore() {
+        try {
+          const raw = window.localStorage.getItem(DOCK_STORE_KEY);
+          if (typeof raw === "string" && raw !== "") {
+            const saved = JSON.parse(raw);
+            if (typeof saved?.open === "boolean") this.open = saved.open;
+            if (typeof saved?.height === "number" && Number.isFinite(saved.height)) this.height = saved.height;
+          }
+        } catch {
+          // Private-browsing or corrupt state: keep the defaults.
+        }
+      },
+      persist() {
+        try {
+          window.localStorage.setItem(DOCK_STORE_KEY, JSON.stringify({ open: this.open, height: this.height }));
+        } catch {
+          // Storage unavailable: the choice lives for this page only.
+        }
+      },
+      setOpen(open) {
+        if (this.open === open) return;
+        this.open = open;
+        this.persist();
+        this.emit();
+      },
+      setActive(active) {
+        if (this.active === active) return;
+        this.active = active;
+        this.emit();
+      },
+      setHeight(height) {
+        const clamped = Math.max(160, Math.min(Math.round(window.innerHeight * 0.7), Math.round(height)));
+        if (this.height === clamped) return;
+        this.height = clamped;
+        this.persist();
+        this.emit();
+      },
+      emit() {
+        for (const listener of this.listeners) listener();
+      },
+      subscribe(listener) {
+        this.listeners.add(listener);
+        return () => {
+          this.listeners.delete(listener);
+        };
+      },
+    };
+    if (typeof window !== "undefined") panelStore.restore();
+
+    /** Stable subscription binding for React external stores. */
+    const subscribeDock = (listener) => panelStore.subscribe(listener);
+
+    /** Reactive `panelStore.open`. */
+    function usePanelOpen() {
+      return React.useSyncExternalStore(subscribeDock, () => panelStore.open);
+    }
+
+    /** Reactive `panelStore.height` (px). */
+    function usePanelHeight() {
+      return React.useSyncExternalStore(subscribeDock, () => panelStore.height);
+    }
+
+    /** Reactive `panelStore.active` (seat key | undefined). */
+    function usePanelActive() {
+      return React.useSyncExternalStore(subscribeDock, () => panelStore.active);
+    }
+
+    /**
+     * One panel seat: the built-in `TerminalBody` mounted on the panel's own
+     * inject bindings — no sidebar occurrence, so the seat is entirely the
+     * panel's business. Only the active seat renders (unmounting an inactive
+     * one is safe: the view survives and re-attachment starts from a complete
+     * bounded screen).
+     */
+    function PanelSeat({ ctx, sessionId, seat, t, themeHook, tTerm, helpersFor }) {
       const [attempt, setAttempt] = React.useState(1);
-      const chunk = useTerminalChunk(mode === "right" ? attempt : 0);
-      const [, tickProbe] = React.useReducer((value) => value + 1, 0);
+      const body = useTerminalChunk(attempt);
+      const helpers = helpersFor(sessionId);
+      // Mount the terminal view: `TerminalView.mount()` is idempotent and the
+      // view survives unmount, so mounting the seat also allocates the process
+      // (first allocation) or re-attaches to the running one (switches).
       React.useEffect(() => {
-        if (mode === "right") return undefined;
-        const timer = window.setInterval(tickProbe, 1000);
-        return () => window.clearInterval(timer);
-      }, [mode]);
-
-      const onDockDown = React.useCallback(() => {
-        dockStore.setMode("bottom");
-      }, []);
-      const onRestore = React.useCallback(() => {
-        dockStore.setMode("right");
-      }, []);
-      const onRetry = React.useCallback(() => {
-        setAttempt((value) => value + 1);
-      }, []);
-
-      if (mode !== "right") {
-        const probe = dockProbe.registered
-          ? dockProbe.renderError === ""
-            ? dockProbe.mounted
-              ? t("dock.probeOk")
-              : `${t("dock.probeNotMounted")} (${dockProbe.lastBlock})`
-            : `${t("dock.probeRenderFail")}: ${dockProbe.renderError}`
-          : dockProbe.error === ""
-            ? t("dock.probePending")
-            : `${t("dock.probeRegFail")}: ${dockProbe.error}`;
-        return jsxs("div", {
+        const model = helpers.view(seat.key);
+        let detach = undefined;
+        try {
+          detach = model.mount();
+        } catch {
+          // Already mounted (or already closed): the view's own state tells.
+        }
+        return () => {
+          if (typeof detach === "function") detach();
+        };
+      }, [helpers, seat.key]);
+      const fabricated = {
+        id: seat.key,
+        kind: "terminal",
+        visible: true,
+        actions: {
+          bindCommands: () => () => {},
+          openResource: () => {},
+          openTab: () => {},
+          close: () => {},
+        },
+      };
+      if (body === null || body === undefined) {
+        return jsx("div", {
           className: "dse-dockPh",
           children: [
-            jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
-              jsx("span", { children: t("dock.placeholder") }),
-              jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.restore"), "aria-label": t("tool.restore"), onClick: onRestore, children: jsx(DockRightIcon, {}) }),
-            ] }),
-            jsx("div", { className: "dse-dockProbe", children: probe }),
-          ],
-        });
-      }
-
-      const helpers = terminalRuntime.helpersFor(sessionId);
-      if (chunk === undefined || chunk === null || chunk.Body === undefined) {
-        return jsxs("div", {
-          className: "dse-dock",
-          style: { height: "100%" },
-          children: [
-            jsx(DockToolbar, { t, onDockDown }),
-            jsx("div", {
-              className: "dse-dockPh",
-              children: chunk === undefined ? t("dock.loading") : jsxs(Fragment, {
-                children: [
-                  jsx("span", { children: t("dock.failed") }),
-                  jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.restore"), onClick: onRetry, children: jsx(P.IconRefreshOutlineRegular, {}) }),
-                ],
-              }),
+            body === null ? t("dock.failed") : t("dock.loading"),
+            body === null && jsx("button", {
+              type: "button",
+              className: "dse-tbarBtn",
+              title: t("menu.refresh"),
+              "aria-label": t("menu.refresh"),
+              onClick: () => setAttempt((value) => value + 1),
+              children: jsx(P.IconRefreshOutlineRegular, {}),
             }),
           ],
         });
       }
-      return jsxs("div", {
-        className: "dse-dock",
-        style: { height: "100%" },
-        children: [
-          jsx(DockToolbar, { t, onDockDown }),
-          jsx("div", { className: "dse-dockBody", children: jsx(BoundTerminalBody, { Body: chunk.Body, helpers, useTheme: terminalRuntime.useTheme, tTerm: terminalRuntime.tTerm, tab }) }),
-        ],
-      });
-    }
-
-    /** The slim toolbar row used by both seats (only the dock toggle for now). */
-    function DockToolbar({ t, onDockDown }) {
-      return jsx("div", {
-        className: "dse-tbar",
-        children: jsx("button", {
-          className: "dse-tbarBtn",
-          type: "button",
-          title: t("tool.dock"),
-          "aria-label": t("tool.dock"),
-          onClick: onDockDown,
-          children: jsx(DockDownIcon, {}),
-        }),
+      return jsx(BoundTerminalBody, {
+        Body: body.Body,
+        helpers,
+        useTheme: themeHook,
+        tTerm,
+        tab: fabricated,
       });
     }
 
     /**
-     * The composer-dock entry: when docked below the composer and a terminal
-     * tab of this session is open, re-seat the same terminal view under the
-     * conversation input with a drag grip for the height.
+     * The panel body (composer-dock entry): a multi-tab terminal column owned
+     * entirely by the panel. "+" allocates a new seat (the panel synthesizes a
+     * unique content identity; the controller creates the Host terminal),
+     * "×" closes the seat's process, tabs switch seats, and the drag grip
+     * resizes the whole panel. No sidebar tab is ever touched.
      */
-    function makeComposerDock(ctx, themeHook, tTerm, helpersFor) {
-      /** Stable openTabs subscription for React external stores. */
-      const subscribeOpenTabs = (listener) => ctx.sidebarRight.openTabs.subscribe(listener);
-      /** Last open terminal tab id (any session); occurrence checks happen per render. */
-      const lastTerminalTabId = () => {
-        const terminals = ctx.sidebarRight.openTabs.getSnapshot().filter((tab) => tab?.kind === "terminal");
-        return terminals.length === 0 ? undefined : terminals[terminals.length - 1].tabId;
+    function makeBottomTerminalPanel(ctx, themeHook, tTerm) {
+      const helpersCache = new Map();
+      const helpersOf = (sessionId) => {
+        let helpers = helpersCache.get(sessionId);
+        if (helpers === undefined) {
+          helpers = makePanelHelpers(ctx, sessionId);
+          helpersCache.set(sessionId, helpers);
+        }
+        return helpers;
       };
-      return function TerminalComposerDock({ sessionId, t }) {
-        const mode = useDockMode();
-        const height = useDockHeight();
-        const [attempt, setAttempt] = React.useState(1);
-        const [, tickPoll] = React.useReducer((value) => value + 1, 0);
-        React.useEffect(() => {
-          if (mode !== "bottom") return undefined;
-          const timer = window.setInterval(tickPoll, 300);
-          return () => window.clearInterval(timer);
-        }, [mode]);
-        const watching = React.useSyncExternalStore(subscribeOpenTabs, lastTerminalTabId) !== undefined;
-        const chunk = useTerminalChunk(mode === "bottom" && watching ? attempt : 0);
 
-        const onRestore = React.useCallback(() => {
-          dockStore.setMode("right");
+      function BottomTerminalPanel({ sessionId, t }) {
+        const open = usePanelOpen();
+        const height = usePanelHeight();
+        const active = usePanelActive();
+        const seats = usePanelSeats();
+        const helpers = helpersOf(sessionId);
+        const activeKey = seats.some((seat) => seat.key === active)
+          ? active
+          : seats.length > 0 ? seats[seats.length - 1].key : undefined;
+        // Reconcile immediately: an effect would defer the switch until after
+        // this render, so the click's result appears on the very next paint.
+        if (activeKey !== undefined && activeKey !== panelStore.active) panelStore.setActive(activeKey);
+        const activeSeat = seats.find((seat) => seat.key === activeKey);
+        // Two distinct fixes:
+        // 1) The effect fires on EVERY session change (the store is module
+        //    level), so a second session's auto-seed previously raced the
+        //    first session's click. Seed at most once per session.
+        // 2) addPanelSeat sets the active key synchronously — the click's
+        //    result must survive, so the seed never overrides it.
+        const seeded = React.useRef(new Set());
+        React.useEffect(() => {
+          if (!open) return undefined;
+          if (seeded.current.has(sessionId)) return undefined;
+          if (panelSeats.items.length > 0) {
+            seeded.current.add(sessionId);
+            return undefined;
+          }
+          seeded.current.add(sessionId);
+          addPanelSeat(sessionId, helpers);
+          return undefined;
+        }, [open, sessionId, helpers]);
+
+        // Switching a tab keeps exactly one seat mounted, so the views of the
+        // hidden seats must stay alive for when they come back: `mount()` was
+        // already called, the process is running, and `connect()` re-attaches.
+        // Close is the only path that ends a process.
+        const onNew = React.useCallback(() => {
+          addPanelSeat(sessionId, helpers);
+        }, [sessionId, helpers]);
+        const onSwitchTab = React.useCallback((key) => {
+          panelStore.setActive(key);
         }, []);
-        const onRetry = React.useCallback(() => {
-          setAttempt((value) => value + 1);
+        const onCloseTab = React.useCallback((key) => {
+          helpers.close(key);
+        }, [helpers]);
+        const onHide = React.useCallback(() => {
+          panelStore.setOpen(false);
         }, []);
         const onGripPointerDown = React.useCallback((event) => {
           if (event.button !== 0) return;
@@ -2088,9 +2222,9 @@ window.__ModuleLoader__.load({
           const grip = event.currentTarget;
           grip.setPointerCapture(event.pointerId);
           const startY = event.clientY;
-          const startHeight = dockStore.height;
+          const startHeight = panelStore.height;
           const onMove = (moveEvent) => {
-            dockStore.setHeight(startHeight + (startY - moveEvent.clientY));
+            panelStore.setHeight(startHeight + (startY - moveEvent.clientY));
           };
           const onUp = () => {
             grip.removeEventListener("pointermove", onMove);
@@ -2101,105 +2235,147 @@ window.__ModuleLoader__.load({
           grip.addEventListener("pointerup", onUp);
           grip.addEventListener("pointercancel", onUp);
         }, []);
+        if (!open) return null;
+        return jsxs("div", {
+          className: "dse-dock",
+          style: { height },
+          "data-dse-panel": "terminal",
+          children: [
+            jsx("div", { className: "dse-dockGrip", onPointerDown: onGripPointerDown }),
+            jsxs("div", {
+              className: "dse-panelBar",
+              children: [
+                jsxs("div", {
+                  className: "dse-panelTabs",
+                  role: "tablist",
+                  children: [
+                    seats.length > 0 && seats.map((seat) => jsxs("div", {
+                      key: seat.key,
+                      className: "dse-panelTabWrap",
+                      "data-active": seat.key === activeKey,
+                      children: [
+                        jsx("button", {
+                          type: "button",
+                          className: "dse-panelTab",
+                          title: seat.title ?? seat.key,
+                          onClick: () => onSwitchTab(seat.key),
+                          children: jsx("span", { className: "dse-panelTabLabel", children: seat.title ?? t("panel.tab") }),
+                        }),
+                        jsx("button", {
+                          type: "button",
+                          className: "dse-panelTabClose",
+                          title: t("menu.delete"),
+                          "aria-label": t("menu.delete"),
+                          onClick: () => onCloseTab(seat.key),
+                          children: jsx(P.IconCloseOutlineRegular, {}),
+                        }),
+                      ],
+                    })),
+                    seats.length === 0 && jsx("span", { className: "dse-panelEmpty", children: t("panel.empty") }),
+                  ],
+                }),
+                jsxs("div", {
+                  className: "dse-panelActions",
+                  children: [
+                    jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.newTerminal"), "aria-label": t("tool.newTerminal"), onClick: onNew, children: jsx(P.IconPlusOutlineRegular, {}) }),
+                    jsx("button", { className: "dse-tbarBtn", type: "button", title: t("panel.hide"), "aria-label": t("panel.hide"), onClick: onHide, children: jsx(IconChevronDownSolid, {}) }),
+                  ],
+                }),
+              ],
+            }),
+            jsx("div", {
+              className: "dse-dockBody",
+              style: { minHeight: 0 },
+              children: activeSeat === undefined ? jsx("div", { className: "dse-dockPh", children: t("panel.empty") }) : jsx(PanelSeat, {
+                key: activeSeat.key,
+                ctx,
+                sessionId,
+                seat: activeSeat,
+                t,
+                themeHook,
+                tTerm,
+                helpersFor: helpersOf,
+              }),
+            }),
+          ],
+        });
+      }
 
-        if (mode !== "bottom") {
-          dockProbe.lastBlock = "mode";
-          dockProbe.mounted = false;
-          return null;
-        }
-        const sid = typeof dockSession.sidebarSessionId === "string" ? dockSession.sidebarSessionId : sessionId;
-        const terminals = ctx.sidebarRight.openTabs.getSnapshot().filter((tab) => tab?.kind === "terminal");
-        dockProbe.terminalTabCount = terminals.length;
-        let tabId;
-        let occurrence;
-        let occurrenceError = "";
-        for (let index = terminals.length - 1; index >= 0; index -= 1) {
-          const candidate = terminals[index];
-          if (candidate.sessionId !== sid) continue;
-          try {
-            occurrence = ctx.sidebarRight.tabDomain.occurrence(candidate.sessionId, { id: candidate.tabId });
-            tabId = candidate.tabId;
-            break;
-          } catch (error) {
-            occurrence = undefined;
-            occurrenceError = String(error?.message ?? error);
-          }
-        }
-        if (occurrence === undefined) {
-          const sidLabel = sid === sessionId ? "sid" : "sid(shadow)";
-          dockProbe.lastBlock = terminals.length === 0
-            ? `tabId(tabs=0; ${sidLabel}=${typeof sid === "string" ? sid : String(sid)})`
-            : `tabId(err: ${occurrenceError}; ${sidLabel}=${typeof sid === "string" ? sid : String(sid)})`;
-          dockProbe.mounted = false;
-          return null;
-        }
+      return BottomTerminalPanel;
+    }
 
-        try {
-          const tab = {
-            id: tabId,
-            kind: "terminal",
-            visible: true,
-            signal: occurrence.signal,
-            actions: occurrence.tabActions,
-          };
-          const helpers = helpersFor(sid);
-          const restore = jsx("button", {
-            className: "dse-tbarBtn",
-            type: "button",
-            title: t("tool.restore"),
-            "aria-label": t("tool.restore"),
-            onClick: onRestore,
-            children: jsx(DockRightIcon, {}),
-          });
+    /** Allocate one fresh panel seat (unique content identity, new terminal). */
+    function addPanelSeat(sessionId, helpers) {
+      const key = "panel-" + panelSeats.nextKey;
+      panelSeats.nextKey += 1;
+      // Mint the content identity eagerly: `webTerminals.view()` caches
+      // bindings per (session, contentId), so a seat reusing an identity that
+      // already pointed at a closed Host terminal would restore the dead id
+      // with createWhenMissing=false (the "此终端已不存在" state). A fresh
+      // UUID per seat creation makes every seat allocate a real terminal.
+      const seat = {
+        key,
+        contentId: mintSeatContentId(sessionId, key),
+        shellPath: undefined,
+        terminalId: undefined,
+      };
+      panelSeats.add(seat);
+      panelStore.setActive(key);
+      // Force the model's refresh chain now so the terminal allocates even
+      // before its seat mounts (the view survives until explicit close).
+      try {
+        helpers.view(key).refresh();
+      } catch {
+        // The seat mounts momentarily and starts the allocation itself.
+      }
+      return seat;
+    }
 
-          let body;
-          if (chunk === undefined) {
-            body = jsx("div", { className: "dse-dockPh", children: t("dock.loading") });
-          } else if (chunk === null || chunk.Body === undefined) {
-            body = jsxs("div", { className: "dse-dockPh", children: [
-              jsx("span", { children: t("dock.failed") }),
-              jsx("button", { className: "dse-tbarBtn", type: "button", title: t("tool.restore"), onClick: onRetry, children: jsx(P.IconRefreshOutlineRegular, {}) }),
-            ] });
-          } else {
-            body = jsx(BoundTerminalBody, { Body: chunk.Body, helpers, useTheme: themeHook, tTerm, tab });
-          }
+    /**
+     * A content identity the controller has never seen: unique per seat, per
+     * creation, and stable afterwards (cached on the seat object).
+     */
+    function mintSeatContentId(sessionId, key) {
+      const bytes = new Uint8Array(16);
+      globalThis.crypto.getRandomValues(bytes);
+      let hex = "";
+      for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+      const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      return `dse-panel:${sessionId}:${key}:${uuid}`;
+    }
 
-          dockProbe.renderError = "";
-          dockProbe.lastBlock = "";
-          dockProbe.mounted = true;
-          return jsxs("div", {
-            className: "dse-dock",
-            style: { height },
-            children: [
-              jsx("div", { className: "dse-dockGrip", onPointerDown: onGripPointerDown }),
-              jsxs("div", { className: "dse-tbar", children: [
-                jsx("span", { children: tTerm("title") }),
-                jsx("span", { style: { flex: 1 } }),
-                restore,
-              ] }),
-              jsx("div", { className: "dse-dockBody", children: body }),
-            ],
-          });
-        } catch (error) {
-          dockProbe.renderError = String(error?.message ?? error);
-          return jsxs("div", { className: "dse-dock", style: { height }, children: [
-            jsx("div", { className: "dse-dockPh", children: `${t("dock.probeRenderFail")}: ${dockProbe.renderError}` }),
-          ] });
-        }
+    /**
+     * The session header button: shows or hides the bottom terminal panel.
+     * A filled look marks the panel as open (the toggle feels like a tab).
+     */
+    function makeHeaderTerminalButton(ctx, t) {
+      return function HeaderTerminalButton() {
+        const open = usePanelOpen();
+        const onClick = React.useCallback(() => {
+          panelStore.setOpen(!panelStore.open);
+        }, []);
+        return jsx("button", {
+          type: "button",
+          className: "dse-tool",
+          "data-open": open,
+          title: t(open ? "panel.hide" : "tool.terminal"),
+          "aria-label": t(open ? "panel.hide" : "tool.terminal"),
+          "aria-pressed": open,
+          onClick,
+          children: jsx(TerminalGlyph, {}),
+        });
       };
     }
 
     //#endregion
-
-    //#region plugin body
 
     /** Required client services: slots, locale, the workspace-files Remote, the document preview registry, plus the terminal dock's services. */
     const inject = ["slots", "locale", "remote", "remote.workspaceFiles", "documentPreviews", "sidebarRight", "webTerminals", "theme"];
 
     /**
      * Client plugin body: inject the stylesheet and dictionaries, shadow the
-     * built-in files tree, register the editable renderer, and re-seat the
-     * built-in terminal body between the sidebar and the composer dock.
+     * built-in files tree, register the editable renderer, and add the bottom
+     * terminal panel with its header toggle button.
      */
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
@@ -2249,7 +2425,7 @@ window.__ModuleLoader__.load({
         }, EditorBody)), "sidebar-enhancement: editable document body");
       }
 
-      // Terminal dock: only when every collaborating service is present.
+      // Bottom terminal panel: only when every collaborating service is present.
       const terminalReady = ctx.sidebarRight !== undefined && ctx.webTerminals !== undefined && ctx.theme !== undefined;
       if (terminalReady) {
         // Bind the runtime the terminal components resolve lazily. The theme
@@ -2257,46 +2433,23 @@ window.__ModuleLoader__.load({
         // own registration (theme/change + 'sidebarTerminal' namespace).
         terminalRuntime.useTheme = selectorHookFor(themeSourceFor(ctx));
         terminalRuntime.tTerm = ctx.locale.bind("sidebarTerminal");
-        const helpersCache = new Map();
-        terminalRuntime.helpersFor = (sessionId) => {
-          let helpers = helpersCache.get(sessionId);
-          if (helpers === undefined) {
-            helpers = makeTerminalHelpers(ctx, sessionId);
-            helpersCache.set(sessionId, helpers);
-          }
-          return helpers;
-        };
 
-        // Shadow the built-in terminal body so its seat can be switched to the
-        // composer dock. No children: the body renders the built-in component
-        // directly, never via renderSlot.
-        ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({
-          name: "sidebar.right.pane.tab",
-          key: TERMINAL_ID,
-          priority: -1,
-          locale: NS,
-        }, SidebarTerminalShadowBody)), "sidebar-enhancement: terminal body seat");
-
-        // The composer dock entry. `conversation.composer.dock` is declared by
-        // the built-in conversation package; slots.inject waits for that
-        // declaration before registering.
+        // The bottom terminal panel: an independent multi-tab terminal column
+        // below the composer, declared by the built-in conversation package;
+        // slots.inject waits for that declaration before registering.
         const themeHook = terminalRuntime.useTheme;
-        ctx.effect(() => ctx.slots.inject("conversation.composer.dock", () => {
-          try {
-            const disposer = ctx.slots.register({
-              name: "conversation.composer.dock",
-              id: DOCK_ID,
-              locale: NS,
-            }, makeComposerDock(ctx, themeHook, terminalRuntime.tTerm, terminalRuntime.helpersFor));
-            dockProbe.registered = true;
-            dockProbe.error = "";
-            return disposer;
-          } catch (error) {
-            dockProbe.registered = false;
-            dockProbe.error = String(error?.message ?? error);
-            throw error;
-          }
-        }), "sidebar-enhancement: terminal composer dock");
+        ctx.effect(() => ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({
+          name: "conversation.composer.dock",
+          id: DOCK_ID,
+          locale: NS,
+        }, makeBottomTerminalPanel(ctx, themeHook, terminalRuntime.tTerm))), "sidebar-enhancement: bottom terminal panel");
+
+        // The session header button that shows/hides the panel.
+        ctx.effect(() => ctx.slots.inject("conversation.session.header.utilities", () => ctx.slots.register({
+          name: "conversation.session.header.utilities",
+          id: PANEL_BUTTON_ID,
+          locale: NS,
+        }, makeHeaderTerminalButton(ctx, t))), "sidebar-enhancement: terminal panel button");
       }
     }
 
