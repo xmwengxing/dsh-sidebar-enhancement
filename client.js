@@ -728,17 +728,31 @@ window.__ModuleLoader__.load({
 /* The quick-command dialog: one wide card holding a nav column and a pane. It
    is built on the host Modal, so only the card's size and the layout inside
    the modal body are this plugin's business. */
-.dse-qcDialog{width:min(780px,100%);height:min(620px,100%);padding-bottom:0}
-.dse-qcContent{flex:1;min-height:0;gap:0}
-/* The modal body carries 24px side padding and a 20px top margin; both are
-   cancelled here so the two panes reach the card's edges. */
-.dse-qcLayout{margin:-20px -24px 0;flex:1;min-height:0;display:flex}
+.dse-qcDialog{width:min(780px,100%);height:min(620px,100%);max-height:100%;padding-bottom:0}
+.dse-qcContent{flex:1;min-height:0;gap:0;overflow:hidden}
+/* THE SCROLL LINK. The host Modal nests content > body > children, where
+   .body is a plain block with 20px top margin and 24px side padding and NO
+   min-height:0, so it sizes to its content and the card (overflow:hidden) just
+   CLIPS anything past 620px instead of scrolling. contentClassName only
+   reaches .content, and .body's class is hashed by CSS modules, so the body
+   is reached structurally: it is always the last direct child div of the
+   content box (header is the first, description is a <p>). Pin it to the
+   remaining height and clear its padding/margin, then let the layout fill it. */
+.dse-qcContent > div:last-child{flex:1;min-width:0;min-height:0;padding:0;margin:0;display:flex;flex-direction:column;overflow:hidden}
+.dse-qcLayout{margin:0;flex:1;min-height:0;display:flex;overflow:hidden}
 .dse-qcNav{flex:none;width:172px;box-sizing:border-box;padding:12px 8px;border-right:.5px solid var(--dsw-alias-border-l3);flex-direction:column;gap:2px;display:flex}
+/* The pane is the only scroll container of the right column: both the nav and
+   every page inside are pinned to it, so the list scrolls inside the card. The
+   page box carries the scroll region's own padding, which also gives the add
+   pane's form the same insets. The height chain is what enables the scroll: the
+   dialog caps itself at 620px, and every box between it and the list must be
+   allowed to shrink below its natural height, otherwise the list would push
+   the card taller instead of scrolling inside it. */
+.dse-qcPane{flex:1;min-width:0;min-height:0;overflow:auto;box-sizing:border-box;position:relative}
+.dse-qcPage{flex:none;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;padding:10px 12px}
 .dse-qcNavItem{width:100%;box-sizing:border-box;text-align:left;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;font:inherit;font-size:13px;padding:7px 10px}
 .dse-qcNavItem:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dse-qcNavItem[data-active=true]{color:var(--dsw-alias-label-primary);font-weight:500;background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}
-.dse-qcPane{flex:1;min-width:0;min-height:0;flex-direction:column;display:flex}
-.dse-qcScroll{flex:1;min-height:0;overflow:auto;padding:10px 12px;scrollbar-gutter:stable}
 .dse-qcGroup{margin:0 0 4px}
 .dse-qcGroupHead{width:100%;box-sizing:border-box;align-items:center;gap:6px;height:28px;text-align:left;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;font:inherit;font-size:12px;padding:0 6px;display:flex}
 .dse-qcGroupHead:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
@@ -760,7 +774,7 @@ button.dse-qcName{cursor:pointer}
 .dse-qcRun svg{width:13px;height:13px}
 .dse-qcRun:hover{color:var(--dsw-alias-feedback-success-fg,#3fb950);background:var(--dsw-alias-interactive-bg-hover)}
 .dse-qcEmpty{margin:0;padding:8px 6px;color:var(--dsw-alias-label-tertiary);font-size:12px}
-.dse-qcForm{flex:none;flex-direction:column;gap:8px;padding:10px 12px 12px;border-top:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);display:flex}
+.dse-qcForm{flex:none;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;padding:10px 0 0;margin-top:10px;border-top:.5px solid var(--dsw-alias-border-l3);position:sticky;bottom:0;background:var(--dsw-alias-bg-layer-2,rgb(28,28,30))}
 .dse-qcFormHead{min-height:20px;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;display:flex}
 .dse-qcFormTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden}
 .dse-qcLink{border:0;cursor:pointer;color:var(--dsw-alias-state-business-primary);background:0 0;font:inherit;font-size:12px;padding:0}
@@ -770,11 +784,11 @@ button.dse-qcName{cursor:pointer}
 .dse-qcInput{flex:1;min-width:0;box-sizing:border-box;height:28px;border:1px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);font:inherit;font-size:13px;padding:0 8px;outline:0}
 .dse-qcInput:focus{border-color:var(--dsw-alias-state-business-primary)}
 .dse-qcInput::placeholder{color:var(--dsw-alias-label-dimmed,var(--dsw-alias-label-tertiary))}
-.dse-qcTextarea{height:auto;min-height:64px;resize:vertical;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px;padding:5px 8px}
+.dse-qcTextarea{height:auto;min-height:64px;max-height:220px;resize:vertical;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px;padding:5px 8px}
 .dse-qcActions{min-height:28px;align-items:center;gap:8px;padding-top:2px;display:flex}
 .dse-qcNotice{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px}
-.dse-qcIo{flex-direction:column;gap:12px;padding:16px;display:flex;max-width:520px}
-.dse-qcIoHint{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6}
+.dse-qcIo{flex-direction:column;gap:12px;padding:10px 12px;box-sizing:border-box;display:flex;max-width:none;align-self:stretch}
+.dse-qcIoHint{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6;word-break:break-all}
 .dse-qcIoNote{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.6}
 .dse-qcIoState{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
 .dse-qcIoState[data-qc-io-state=unavailable]{color:var(--dsw-alias-feedback-warning-fg,#d29922)}
@@ -896,6 +910,7 @@ button.dse-qcName{cursor:pointer}
       "qc.newCommand": "新命令",
       "qc.editing": "正在编辑：{name}",
       "qc.untitled": "未命名",
+      "qc.cancelEdit": "取消编辑",
       "qc.fieldName": "名称",
       "qc.fieldGroup": "分组",
       "qc.fieldNote": "备注",
@@ -1027,6 +1042,7 @@ button.dse-qcName{cursor:pointer}
       "qc.newCommand": "New command",
       "qc.editing": "Editing: {name}",
       "qc.untitled": "untitled",
+      "qc.cancelEdit": "Cancel editing",
       "qc.fieldName": "Name",
       "qc.fieldGroup": "Group",
       "qc.fieldNote": "Note",
@@ -2943,8 +2959,8 @@ button.dse-qcName{cursor:pointer}
               ? jsx("div", {
                   className: "dse-qcPane",
                   "data-pane": "view",
-                  children: jsxs("div", {
-                    className: "dse-qcScroll",
+                  children: jsx("div", {
+                    className: "dse-qcPage",
                     children: [
                       quickStore.source === "unavailable"
                         ? jsx("p", { className: "dse-qcWarn", role: "status", children: t("qc.ioWarn") })
@@ -2954,11 +2970,12 @@ button.dse-qcName{cursor:pointer}
                   }),
                 })
               : pane === "io"
-              ? jsxs("div", {
+              ? jsx("div", {
                   className: "dse-qcPane",
                   "data-pane": "io",
-                  children: [
-                    jsxs("div", {
+                  children: jsx("div", {
+                    className: "dse-qcPage",
+                    children: jsxs("div", {
                       className: "dse-qcIo",
                       children: [
                         jsx("p", {
@@ -3002,77 +3019,86 @@ button.dse-qcName{cursor:pointer}
                           role: "status",
                           children: t(`qc.ioState.${quickStore.source}`),
                         }),
-                        jsx("p", { className: "dse-qcIoNote", children: t("qc.ioNote", { count: String(items.length) }) }),
-                        notice === null ? null : jsx("span", { className: "dse-qcNotice", role: "status", children: notice.text }),
+                        jsx("p", {
+                          className: "dse-qcIoNote",
+                          children: t("qc.ioNote", { count: String(items.length) }),
+                        }),
                       ],
                     }),
-                  ],
+                  }),
                 })
-              : jsxs("div", {
+              : jsx("div", {
                   className: "dse-qcPane",
                   "data-pane": "add",
-                  children: [
-                    jsx("div", { className: "dse-qcScroll", "data-qc-list": true, children: renderGroups("add") }),
-                    jsxs("div", {
-                      className: "dse-qcForm",
-                      children: [
-                        jsxs("div", {
-                          className: "dse-qcFormHead",
-                          children: [
-                            jsx("span", {
-                              className: "dse-qcFormTitle",
-                              "data-qc-editing": editing === null ? "" : editing,
-                              children: editing === null
-                                ? t("qc.newCommand")
-                                : t("qc.editing", { name: draft.name === "" ? t("qc.untitled") : draft.name }),
-                            }),
-                            editing === null ? null : jsx("button", {
-                              type: "button",
-                              className: "dse-qcLink",
-                              onClick: startNew,
-                              children: t("qc.newCommand"),
-                            }),
-                          ],
-                        }),
-                        textField("name", t("qc.fieldName"), t("qc.namePlaceholder"), false),
-                        textField("group", t("qc.fieldGroup"), t("qc.groupPlaceholder"), false),
-                        textField("note", t("qc.fieldNote"), t("qc.notePlaceholder"), false),
-                        textField("command", t("qc.fieldCommand"), t("qc.commandPlaceholder"), true),
-                        jsx("datalist", {
-                          id: QUICK_GROUP_LIST_ID,
-                          children: groupNames.map((name) => jsx("option", { value: name, key: name })),
-                        }),
-                        jsxs("div", {
-                          className: "dse-qcActions",
-                          children: [
-                            jsx(P.Button, {
-                              type: "button",
-                              variant: "outline",
-                              size: "sm",
-                              "data-qc-add": true,
-                              onClick: onAdd,
-                              children: t("qc.add"),
-                            }),
-                            jsx(P.Button, {
-                              type: "button",
-                              variant: "primary",
-                              size: "sm",
-                              "data-qc-save": true,
-                              disabled: editing === null,
-                              onClick: onSave,
-                              children: t("qc.save"),
-                            }),
-                            notice === null ? null : jsx("span", { className: "dse-qcNotice", role: "status", children: notice.text }),
-                          ],
-                        }),
-                      ],
-                    }),
-                  ],
+                  children: jsx("div", {
+                    className: "dse-qcPage",
+                    children: [
+                      renderGroups("add"),
+                      jsxs("div", {
+                        className: "dse-qcForm",
+                        children: [
+                          jsxs("div", {
+                            className: "dse-qcFormHead",
+                            children: [
+                              jsx("span", {
+                                className: "dse-qcFormTitle",
+                                "data-qc-editing": editing === null ? "" : editing,
+                                children: editing === null
+                                  ? t("qc.newCommand")
+                                  : t("qc.editing", { name: draft.name.trim() === "" ? t("qc.untitled") : draft.name.trim() }),
+                              }),
+                              editing === null
+                                ? null
+                                : jsx("span", {
+                                    className: "dse-qcLink",
+                                    type: "button",
+                                    "data-qc-cancel": true,
+                                    onClick: startNew,
+                                    children: t("qc.cancelEdit"),
+                                  }),
+                            ],
+                          }),
+                          textField("name", t("qc.fieldName"), t("qc.namePlaceholder"), false),
+                          textField("group", t("qc.fieldGroup"), t("qc.groupPlaceholder"), false),
+                          textField("note", t("qc.fieldNote"), t("qc.notePlaceholder"), false),
+                          textField("command", t("qc.fieldCommand"), t("qc.commandPlaceholder"), true),
+                          jsx("datalist", {
+                            id: QUICK_GROUP_LIST_ID,
+                            children: groupNames.map((name) => jsx("option", { value: name, key: name })),
+                          }),
+                          jsxs("div", {
+                            className: "dse-qcActions",
+                            children: [
+                              jsx(P.Button, {
+                                type: "button",
+                                variant: "outline",
+                                size: "sm",
+                                "data-qc-add": true,
+                                onClick: onAdd,
+                                children: t("qc.add"),
+                              }),
+                              jsx(P.Button, {
+                                type: "button",
+                                variant: "primary",
+                                size: "sm",
+                                "data-qc-save": true,
+                                 onClick: onSave,
+                                 children: t("qc.save"),
+                               }),
+                              notice === null
+                                ? null
+                                : jsx("span", { className: "dse-qcNotice", role: "status", children: notice.text }),
+                            ],
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
                 }),
-          ],
-        }),
-      });
-    }
+              ],
+            }),
+        });
+      }
 
     //#endregion
 
@@ -3086,7 +3112,14 @@ button.dse-qcName{cursor:pointer}
      * A seat is `{key, terminalId?, shellPath?, contentId}`; the seat key is
      * unique per panel tab and unrelated to any sidebar tab id. The terminal
      * process is owned by the Host (`ctx.webTerminals`); closing a seat calls
-     * `view.close()` + `view.dispose()` directly, with no sidebar involvement.
+     * `ctx.webTerminals.close` through the controller, never `view.close()`
+     * directly, so the Host's per-session terminal accounting stays right.
+     *
+     * `panelSeats` is a plain external store rather than React state because
+     * keeping it in state made every unrelated panel render (height, open)
+     * rebuild the seat list and unmount/remount the active terminal — losing
+     * its scrollback and, worse, resurrecting a terminal whose Host process
+     * had closed.
      */
     const panelSeats = {
       items: [],
@@ -3599,8 +3632,6 @@ button.dse-qcName{cursor:pointer}
         }, makeHeaderTerminalButton(ctx, t))), "sidebar-enhancement: terminal panel button");
       }
     }
-
-    //#endregion
 
     exports.apply = apply;
     exports.inject = inject;
