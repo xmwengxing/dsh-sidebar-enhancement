@@ -774,6 +774,9 @@ button.dse-qcName{cursor:pointer}
 .dse-qcRun svg{width:13px;height:13px}
 .dse-qcRun:hover{color:var(--dsw-alias-feedback-success-fg,#3fb950);background:var(--dsw-alias-interactive-bg-hover)}
 .dse-qcEmpty{margin:0;padding:8px 6px;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dse-qcTools{align-items:center;justify-content:flex-end;display:flex;padding:0 6px 6px}
+.dse-qcTools .dse-qcLink{border-radius:var(--dsw-radius-sm,4px);padding:1px 4px}
+.dse-qcTools .dse-qcLink:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dse-qcForm{flex:none;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;padding:10px 0 0;margin-top:10px;border-top:.5px solid var(--dsw-alias-border-l3);position:sticky;bottom:0;background:var(--dsw-alias-bg-layer-2,rgb(28,28,30))}
 .dse-qcFormHead{min-height:20px;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;display:flex}
 .dse-qcFormTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden}
@@ -906,6 +909,8 @@ button.dse-qcName{cursor:pointer}
       "qc.copyNamed": "复制命令“{name}”",
       "qc.copyFailed": "复制失败，请手动选择命令文本",
       "qc.ungrouped": "未分组",
+      "qc.collapseAll": "全部折叠",
+      "qc.expandAll": "全部展开",
       "qc.empty": "还没有命令，切到「添加命令」添加第一条",
       "qc.newCommand": "新命令",
       "qc.editing": "正在编辑：{name}",
@@ -1038,6 +1043,8 @@ button.dse-qcName{cursor:pointer}
       "qc.copyNamed": "Copy the command “{name}”",
       "qc.copyFailed": "Copy failed — select the command text manually",
       "qc.ungrouped": "Ungrouped",
+      "qc.collapseAll": "Collapse all",
+      "qc.expandAll": "Expand all",
       "qc.empty": "No commands yet — use “Add command” to create the first one",
       "qc.newCommand": "New command",
       "qc.editing": "Editing: {name}",
@@ -2671,6 +2678,14 @@ button.dse-qcName{cursor:pointer}
         setCollapsed((prev) => (prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]));
       }, []);
 
+      /** Every group is folded away, so the control offers the inverse action. */
+      const allCollapsed = groups.length > 0 && groups.every((group) => collapsed.includes(group.key));
+
+      /** Fold or unfold every group at once. */
+      const toggleAll = React.useCallback(() => {
+        setCollapsed(allCollapsed ? [] : groups.map((group) => group.key));
+      }, [allCollapsed, groups]);
+
       const onCopy = React.useCallback(async (item) => {
         if ((await copyText(item.command)) === true) {
           setCopied(item.id);
@@ -2837,6 +2852,25 @@ button.dse-qcName{cursor:pointer}
       });
 
       /**
+       * The one-line control above a group list. It is hidden only when there
+       * is nothing to fold, and it always names the action it will perform
+       * rather than the current state.
+       */
+      const renderGroupTools = () => {
+        if (groups.length === 0) return null;
+        return jsx("div", {
+          className: "dse-qcTools",
+          children: jsx("button", {
+            type: "button",
+            className: "dse-qcLink",
+            "data-qc-toggle-all": allCollapsed ? "expand" : "collapse",
+            onClick: toggleAll,
+            children: allCollapsed ? t("qc.expandAll") : t("qc.collapseAll"),
+          }),
+        });
+      };
+
+      /**
        * The grouped command list both panes render. `mode` decides what a
        * command name does: view mode only copies through its own button, add
        * mode selects the command into the form below.
@@ -2965,6 +2999,7 @@ button.dse-qcName{cursor:pointer}
                       quickStore.source === "unavailable"
                         ? jsx("p", { className: "dse-qcWarn", role: "status", children: t("qc.ioWarn") })
                         : null,
+                      renderGroupTools(),
                       renderGroups("view"),
                     ],
                   }),
@@ -3033,6 +3068,7 @@ button.dse-qcName{cursor:pointer}
                   children: jsx("div", {
                     className: "dse-qcPage",
                     children: [
+                      renderGroupTools(),
                       renderGroups("add"),
                       jsxs("div", {
                         className: "dse-qcForm",
