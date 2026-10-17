@@ -754,9 +754,19 @@ window.__ModuleLoader__.load({
 .dse-qcNavItem:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dse-qcNavItem[data-active=true]{color:var(--dsw-alias-label-primary);font-weight:500;background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}
 .dse-qcGroup{margin:0 0 4px}
-.dse-qcGroupHead{width:100%;box-sizing:border-box;align-items:center;gap:6px;height:28px;text-align:left;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;font:inherit;font-size:12px;padding:0 6px;display:flex}
+.dse-qcGroupHead{width:100%;box-sizing:border-box;align-items:center;gap:6px;height:28px;text-align:left;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;font:inherit;font-size:12px;padding:0 6px;display:flex;min-width:0;flex:1}
 .dse-qcGroupHead:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dse-qcGroupHead svg{width:12px;height:12px;flex:none}
+.dse-qcGroupRow{align-items:center;gap:2px;display:flex;border-radius:var(--dsw-radius-sm)}
+.dse-qcGroupRow:hover .dse-qcGroupHead{color:var(--dsw-alias-label-primary)}
+.dse-qcDelete{width:22px;height:22px;flex:none;justify-content:center;align-items:center;padding:3px;border:0;border-radius:var(--dsw-radius-sm);cursor:pointer;color:var(--dsw-alias-label-tertiary);background:0 0;display:inline-flex;opacity:.6}
+.dse-qcDelete svg{width:13px;height:13px}
+.dse-qcDelete:hover{color:var(--dsw-alias-feedback-danger-fg,#f85149);background:var(--dsw-alias-interactive-bg-hover);opacity:1}
+.dse-qcDelete:focus-visible{opacity:1;outline:2px solid var(--dsw-alias-border-focus,var(--dsw-alias-label-tertiary));outline-offset:-1px}
+@media (hover:hover){
+.dse-qcDelete{opacity:0}
+.dse-qcRow:hover .dse-qcDelete,.dse-qcDelete:focus-visible,.dse-qcGroupRow:hover .dse-qcDelete,.dse-qcDeleteGroup:focus-visible{opacity:1}
+}
 .dse-qcGroupName{text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;overflow:hidden;font-weight:500}
 .dse-qcCount{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .dse-qcList{margin:0;padding:0 0 2px 18px;list-style:none;flex-direction:column;gap:1px;display:flex}
@@ -790,6 +800,9 @@ button.dse-qcName{cursor:pointer}
 .dse-qcTextarea{height:auto;min-height:64px;max-height:220px;resize:vertical;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px;padding:5px 8px}
 .dse-qcActions{min-height:28px;align-items:center;gap:8px;padding-top:2px;display:flex}
 .dse-qcNotice{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dse-qcNoticeRow{display:flex;justify-content:flex-end;padding:0 6px 4px}
+.dse-qcNoticeRow .dse-qcNotice{margin-left:0}
+.dse-qcNoticeSticky{color:var(--dsw-alias-feedback-success-fg,#3fb950)}
 .dse-qcIo{flex-direction:column;gap:12px;padding:10px 12px;box-sizing:border-box;display:flex;max-width:none;align-self:stretch}
 .dse-qcIoHint{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6;word-break:break-all}
 .dse-qcIoNote{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.6}
@@ -916,6 +929,14 @@ button.dse-qcName{cursor:pointer}
       "qc.editing": "正在编辑：{name}",
       "qc.untitled": "未命名",
       "qc.cancelEdit": "取消编辑",
+      "qc.deleteCommand": "删除命令",
+      "qc.deleteCommandNamed": "删除命令“{name}”",
+      "qc.deleteConfirm": "删除命令“{name}”？此操作无法撤销。",
+      "qc.deleted": "已删除：{name}",
+      "qc.deleteGroup": "删除分组",
+      "qc.deleteGroupNamed": "删除分组“{group}”",
+      "qc.deleteGroupConfirm": "删除分组“{group}”及其中的 {count} 条命令？此操作无法撤销。",
+      "qc.deletedGroup": "已删除分组「{group}」，共 {count} 条命令",
       "qc.fieldName": "名称",
       "qc.fieldGroup": "分组",
       "qc.fieldNote": "备注",
@@ -1050,6 +1071,14 @@ button.dse-qcName{cursor:pointer}
       "qc.editing": "Editing: {name}",
       "qc.untitled": "untitled",
       "qc.cancelEdit": "Cancel editing",
+      "qc.deleteCommand": "Delete command",
+      "qc.deleteCommandNamed": "Delete the command “{name}”",
+      "qc.deleteConfirm": "Delete “{name}”? This cannot be undone.",
+      "qc.deleted": "Deleted: {name}",
+      "qc.deleteGroup": "Delete group",
+      "qc.deleteGroupNamed": "Delete the group “{group}”",
+      "qc.deleteGroupConfirm": "Delete the group “{group}” and its {count} commands? This cannot be undone.",
+      "qc.deletedGroup": "Deleted group “{group}” with {count} commands",
       "qc.fieldName": "Name",
       "qc.fieldGroup": "Group",
       "qc.fieldNote": "Note",
@@ -2568,6 +2597,32 @@ button.dse-qcName{cursor:pointer}
         this.emit();
         return saved;
       },
+      /** Drop one command. Returns false when the id is already gone. */
+      remove(id) {
+        const next = this.items.filter((item) => item.id !== id);
+        if (next.length === this.items.length) return false;
+        this.items = next;
+        this.persist();
+        this.scheduleSave();
+        this.emit();
+        return true;
+      },
+      /**
+       * Drop every command in one group. An empty string is the ungrouped
+       * bucket, which is a real group for this purpose: it is where commands
+       * with no group live, and it is the only way to clear them in bulk.
+       * @returns {number} how many commands went away
+       */
+      removeGroup(group) {
+        const next = this.items.filter((item) => item.group !== group);
+        const removed = this.items.length - next.length;
+        if (removed === 0) return 0;
+        this.items = next;
+        this.persist();
+        this.scheduleSave();
+        this.emit();
+        return removed;
+      },
       /** Replace the whole library (restoring a backup file). */
       replaceAll(items) {
         this.items = items.map((item) => ({ ...item }));
@@ -2658,20 +2713,51 @@ button.dse-qcName{cursor:pointer}
       const [draft, setDraft] = React.useState(EMPTY_DRAFT);
       const [copied, setCopied] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
+      /**
+       * The acknowledgement of the last library change. It lives apart from
+       * `notice` so that a later transient line (a failed copy, a terminal
+       * that is not ready) cannot replace it and then dismiss itself, which
+       * would silently drop the one message the author needs to read.
+       */
+      const [sticky, setSticky] = React.useState(null);
       const noticeSeq = React.useRef(0);
+      /** Live auto-dismiss timers, cleared when the dialog unmounts. */
+      const timers = React.useRef(new Set());
       const fileRef = React.useRef(null);
+
+      React.useEffect(() => {
+        const pending = timers.current;
+        return () => {
+          for (const timer of pending) window.clearTimeout(timer);
+          pending.clear();
+        };
+      }, []);
 
       const groups = React.useMemo(() => groupCommands(items), [items]);
       const groupNames = React.useMemo(() => [...new Set(items.map((item) => item.group).filter((name) => name !== ""))], [items]);
 
-      /** Show one transient line beside the form actions. */
-      const announce = React.useCallback((text) => {
+      /**
+       * Show one line beside the form actions.
+       *
+       * A result that reports a change to the library — "added", "saved" — is
+       * sticky: it stays until the user leaves the form with "Cancel editing",
+       * because an acknowledgement that vanishes before it is read leaves the
+       * author unsure whether the click landed. Everything else (failures,
+       * run and copy results) is transient, since it describes an attempt
+       * rather than a change.
+       */
+      const announce = React.useCallback((text, options) => {
+        if (options !== undefined && options.sticky === true) {
+          setSticky({ text });
+          return;
+        }
         noticeSeq.current += 1;
         const seq = noticeSeq.current;
         setNotice({ id: seq, text });
-        window.setTimeout(() => {
+        const timer = window.setTimeout(() => {
           setNotice((current) => (current !== null && current.id === seq ? null : current));
         }, 2400);
+        timers.current.add(timer);
       }, []);
 
       const toggleGroup = React.useCallback((key) => {
@@ -2782,9 +2868,14 @@ button.dse-qcName{cursor:pointer}
         setDraft({ name: item.name, group: item.group, note: item.note, command: item.command });
       }, []);
 
-      /** Leave edit mode and clear the fields for a fresh command. */
+      /**
+       * Leave edit mode and clear the fields for a fresh command. This is the
+       * one action that clears the sticky acknowledgement, by design: it is
+       * how the author says "I am done with that one".
+       */
       const startNew = React.useCallback(() => {
         setNotice(null);
+        setSticky(null);
         setEditing(null);
         setDraft(EMPTY_DRAFT);
       }, []);
@@ -2797,7 +2888,8 @@ button.dse-qcName{cursor:pointer}
         const created = quickStore.add(draft);
         setEditing(created.id);
         setDraft({ name: created.name, group: created.group, note: created.note, command: created.command });
-        announce(t("qc.added"));
+        announce(t("qc.added"), { sticky: true });
+        setPane("add");
       }, [announce, draft, t]);
 
       const onSave = React.useCallback(() => {
@@ -2816,8 +2908,40 @@ button.dse-qcName{cursor:pointer}
           return;
         }
         setDraft({ name: saved.name, group: saved.group, note: saved.note, command: saved.command });
-        announce(t("qc.saved"));
+        announce(t("qc.saved"), { sticky: true });
       }, [announce, draft, editing, t]);
+
+      /** Drop one command after a confirmation, since this cannot be undone. */
+      const onDeleteCommand = React.useCallback((item) => {
+        if (window.confirm(t("qc.deleteConfirm", { name: item.name })) !== true) return;
+        const removed = quickStore.remove(item.id);
+        if (removed !== true) {
+          announce(t("qc.gone"));
+          return;
+        }
+        if (editing === item.id) {
+          setEditing(null);
+          setDraft(EMPTY_DRAFT);
+        }
+        announce(t("qc.deleted", { name: item.name }));
+      }, [announce, editing, t]);
+
+      /** Drop every command of one group, named in the confirmation. */
+      const onDeleteGroup = React.useCallback((group) => {
+        const label = group.key === "" ? t("qc.ungrouped") : group.key;
+        if (window.confirm(t("qc.deleteGroupConfirm", { group: label, count: String(group.commands.length) })) !== true) return;
+        const removed = quickStore.removeGroup(group.key);
+        if (removed === 0) {
+          announce(t("qc.gone"));
+          return;
+        }
+        setCollapsed((prev) => prev.filter((name) => name !== group.key));
+        if (editing !== null && group.commands.some((item) => item.id === editing)) {
+          setEditing(null);
+          setDraft(EMPTY_DRAFT);
+        }
+        announce(t("qc.deletedGroup", { group: label, count: String(removed) }));
+      }, [announce, editing, t]);
 
       /** One text field, single-line except for the command itself. */
       const textField = (key, label, placeholder, multiline) => jsxs("label", {
@@ -2850,6 +2974,15 @@ button.dse-qcName{cursor:pointer}
               }),
         ],
       });
+
+      /** The transient line: failures and the results of run/copy attempts. */
+      const renderNotice = () => (notice === null
+        ? null
+        : jsx("div", {
+            className: "dse-qcNoticeRow",
+            role: "status",
+            children: jsx("span", { className: "dse-qcNotice", children: notice.text }),
+          }));
 
       /**
        * The one-line control above a group list. It is hidden only when there
@@ -2885,17 +3018,31 @@ button.dse-qcName{cursor:pointer}
             className: "dse-qcGroup",
             key: group.key === "" ? "::ungrouped" : group.key,
             children: [
-              jsxs("button", {
-                type: "button",
-                className: "dse-qcGroupHead",
-                "aria-expanded": isCollapsed !== true,
-                onClick: () => toggleGroup(group.key),
+              jsxs("div", {
+                className: "dse-qcGroupRow",
                 children: [
-                  isCollapsed
-                    ? jsx(P.IconChevronRightOutlineRegular, { key: "chevron" })
-                    : jsx(P.IconChevronDownOutlineRegular, { key: "chevron" }),
-                  jsx("span", { className: "dse-qcGroupName", children: group.key === "" ? t("qc.ungrouped") : group.key, key: "name" }),
-                  jsx("span", { className: "dse-qcCount", children: String(group.commands.length), key: "count" }),
+                  jsxs("button", {
+                    type: "button",
+                    className: "dse-qcGroupHead",
+                    "aria-expanded": isCollapsed !== true,
+                    onClick: () => toggleGroup(group.key),
+                    children: [
+                      isCollapsed
+                        ? jsx(P.IconChevronRightOutlineRegular, { key: "chevron" })
+                        : jsx(P.IconChevronDownOutlineRegular, { key: "chevron" }),
+                      jsx("span", { className: "dse-qcGroupName", children: group.key === "" ? t("qc.ungrouped") : group.key, key: "name" }),
+                      jsx("span", { className: "dse-qcCount", children: String(group.commands.length), key: "count" }),
+                    ],
+                  }),
+                  jsx("button", {
+                    type: "button",
+                    className: "dse-qcDelete dse-qcDeleteGroup",
+                    "data-qc-delete-group": group.key === "" ? "::ungrouped" : group.key,
+                    title: t("qc.deleteGroup"),
+                    "aria-label": t("qc.deleteGroupNamed", { group: group.key === "" ? t("qc.ungrouped") : group.key }),
+                    onClick: () => onDeleteGroup(group),
+                    children: jsx(P.IconTrashOutlineRegular, {}),
+                  }),
                 ],
               }),
               isCollapsed ? null : jsx("ul", {
@@ -2937,6 +3084,15 @@ button.dse-qcName{cursor:pointer}
                       children: copied === item.id
                         ? jsx(P.IconCheckOutlineRegular, {})
                         : jsx(P.IconCopyOutlineRegular, {}),
+                    }),
+                    jsx("button", {
+                      type: "button",
+                      className: "dse-qcDelete",
+                      "data-qc-delete": item.id,
+                      title: t("qc.deleteCommand"),
+                      "aria-label": t("qc.deleteCommandNamed", { name: item.name }),
+                      onClick: () => onDeleteCommand(item),
+                      children: jsx(P.IconTrashOutlineRegular, {}),
                     }),
                   ],
                 }, item.id)),
@@ -3000,6 +3156,7 @@ button.dse-qcName{cursor:pointer}
                         ? jsx("p", { className: "dse-qcWarn", role: "status", children: t("qc.ioWarn") })
                         : null,
                       renderGroupTools(),
+                      renderNotice(),
                       renderGroups("view"),
                     ],
                   }),
@@ -3069,6 +3226,7 @@ button.dse-qcName{cursor:pointer}
                     className: "dse-qcPage",
                     children: [
                       renderGroupTools(),
+                      renderNotice(),
                       renderGroups("add"),
                       jsxs("div", {
                         className: "dse-qcForm",
@@ -3118,12 +3276,17 @@ button.dse-qcName{cursor:pointer}
                                 variant: "primary",
                                 size: "sm",
                                 "data-qc-save": true,
-                                 onClick: onSave,
-                                 children: t("qc.save"),
-                               }),
-                              notice === null
+                                onClick: onSave,
+                                children: t("qc.save"),
+                              }),
+                              sticky === null
                                 ? null
-                                : jsx("span", { className: "dse-qcNotice", role: "status", children: notice.text }),
+                                : jsx("span", {
+                                    className: "dse-qcNotice dse-qcNoticeSticky",
+                                    "data-qc-sticky": true,
+                                    role: "status",
+                                    children: sticky.text,
+                                  }),
                             ],
                           }),
                         ],
