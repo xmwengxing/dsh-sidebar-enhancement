@@ -7,6 +7,20 @@
 
 An enhanced sidebar plugin for DeepSeek Harness: full file-management operations on the files tree, plus an editable, savable document preview.
 
+## 截图 / Screenshots
+
+**文件树与下侧终端面板 / Files tree and the bottom terminal panel** — 右键菜单提供打开、下载、复制完整路径、新建、重命名、删除；输入框下方是带标签页的独立终端面板
+
+![文件树与下侧终端面板 / Files tree and bottom terminal panel](assets/screenshot-files-tree.png)
+
+**命令库 / Quick-command library** — 按分组折叠的命令列表，每条可运行（送入当前终端）或复制；左侧导航另有「添加命令」与「备份与恢复」
+
+![命令库 / Quick-command library](assets/screenshot-quick-commands.png)
+
+**文档编辑器 / Document editor** — 预览区直接编辑、`Ctrl/Cmd+S` 保存，右上角可切换回内置渲染器
+
+![文档编辑器 / Document editor](assets/screenshot-document-editor.png)
+
 ## 功能 / Features
 
 **文件树 / Files tree**（影子替换内置文件面板）
