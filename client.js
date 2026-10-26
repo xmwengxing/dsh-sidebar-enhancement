@@ -948,6 +948,7 @@ button.dse-qcName{cursor:pointer}
       "qc.add": "添加",
       "qc.save": "保存",
       "qc.added": "已添加",
+      "qc.duplicate": "已存在同名命令：{name}",
       "qc.saved": "已保存",
       "qc.needFields": "名称和命令不能为空",
       "qc.needSelection": "先在上方选择一个命令",
@@ -1090,6 +1091,7 @@ button.dse-qcName{cursor:pointer}
       "qc.add": "Add",
       "qc.save": "Save",
       "qc.added": "Added",
+      "qc.duplicate": "A command with that name already exists: {name}",
       "qc.saved": "Saved",
       "qc.needFields": "Name and command are required",
       "qc.needSelection": "Pick a command above first",
@@ -2708,7 +2710,8 @@ button.dse-qcName{cursor:pointer}
     function QuickCommandsDialog({ open, onClose, t, runCommand }) {
       const items = useQuickCommands();
       const [pane, setPane] = React.useState("view");
-      const [collapsed, setCollapsed] = React.useState([]);
+      /** Groups start folded: a group is shown only once its key is expanded. */
+      const [expanded, setExpanded] = React.useState([]);
       const [editing, setEditing] = React.useState(null);
       const [draft, setDraft] = React.useState(EMPTY_DRAFT);
       const [copied, setCopied] = React.useState(null);
@@ -2760,17 +2763,17 @@ button.dse-qcName{cursor:pointer}
         timers.current.add(timer);
       }, []);
 
-      const toggleGroup = React.useCallback((key) => {
-        setCollapsed((prev) => (prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]));
+      const toggleExpand = React.useCallback((key) => {
+        setExpanded((prev) => (prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]));
       }, []);
 
-      /** Every group is folded away, so the control offers the inverse action. */
-      const allCollapsed = groups.length > 0 && groups.every((group) => collapsed.includes(group.key));
+      /** Every group is unfolded, so the control offers the inverse action. */
+      const allExpanded = groups.length > 0 && groups.every((group) => expanded.includes(group.key));
 
       /** Fold or unfold every group at once. */
       const toggleAll = React.useCallback(() => {
-        setCollapsed(allCollapsed ? [] : groups.map((group) => group.key));
-      }, [allCollapsed, groups]);
+        setExpanded(allExpanded ? [] : groups.map((group) => group.key));
+      }, [allExpanded, groups]);
 
       const onCopy = React.useCallback(async (item) => {
         if ((await copyText(item.command)) === true) {
@@ -2869,25 +2872,30 @@ button.dse-qcName{cursor:pointer}
       }, []);
 
       /**
-       * Leave edit mode and clear the fields for a fresh command. This is the
-       * one action that clears the sticky acknowledgement, by design: it is
-       * how the author says "I am done with that one".
+       * Add the draft as a new command. A command is identified by its
+       * content (name + group + note + command), not by its id, so two
+       * commands with the same name (and the same details) are the same
+       * command. Repeated clicks on "Add" must not stamp out duplicates:
+       * when one already exists we keep it and tell the author instead of
+       * creating another copy that would later collapse into one on reload.
        */
-      const startNew = React.useCallback(() => {
-        setNotice(null);
-        setSticky(null);
-        setEditing(null);
-        setDraft(EMPTY_DRAFT);
-      }, []);
-
       const onAdd = React.useCallback(() => {
         if (draft.name.trim() === "" || draft.command.trim() === "") {
           announce(t("qc.needFields"));
           return;
         }
-        const created = quickStore.add(draft);
-        setEditing(created.id);
-        setDraft({ name: created.name, group: created.group, note: created.note, command: created.command });
+        const normalized = normalizeCommand(draft);
+        const exists = quickStore.items.some((item) => commandKey(normalized) === commandKey(item));
+        if (exists) {
+          announce(t("qc.duplicate", { name: normalized.name }), { sticky: true });
+          return;
+        }
+        quickStore.add(draft);
+        // Leave the form cleared for the next entry; the success line stands
+        // on its own, so there is no "cancel edit" to undo into.
+        setEditing(null);
+        setDraft(EMPTY_DRAFT);
+        setNotice(null);
         announce(t("qc.added"), { sticky: true });
         setPane("add");
       }, [announce, draft, t]);
@@ -2935,7 +2943,7 @@ button.dse-qcName{cursor:pointer}
           announce(t("qc.gone"));
           return;
         }
-        setCollapsed((prev) => prev.filter((name) => name !== group.key));
+        setExpanded((prev) => prev.filter((name) => name !== group.key));
         if (editing !== null && group.commands.some((item) => item.id === editing)) {
           setEditing(null);
           setDraft(EMPTY_DRAFT);
@@ -2996,9 +3004,9 @@ button.dse-qcName{cursor:pointer}
           children: jsx("button", {
             type: "button",
             className: "dse-qcLink",
-            "data-qc-toggle-all": allCollapsed ? "expand" : "collapse",
+            "data-qc-toggle-all": allExpanded ? "collapse" : "expand",
             onClick: toggleAll,
-            children: allCollapsed ? t("qc.expandAll") : t("qc.collapseAll"),
+            children: allExpanded ? t("qc.collapseAll") : t("qc.expandAll"),
           }),
         });
       };
@@ -3013,7 +3021,7 @@ button.dse-qcName{cursor:pointer}
           return jsx("p", { className: "dse-qcEmpty", children: t("qc.empty") });
         }
         return groups.map((group) => {
-          const isCollapsed = collapsed.includes(group.key);
+          const isCollapsed = expanded.includes(group.key) !== true;
           return jsxs("div", {
             className: "dse-qcGroup",
             key: group.key === "" ? "::ungrouped" : group.key,
@@ -3024,8 +3032,8 @@ button.dse-qcName{cursor:pointer}
                   jsxs("button", {
                     type: "button",
                     className: "dse-qcGroupHead",
-                    "aria-expanded": isCollapsed !== true,
-                    onClick: () => toggleGroup(group.key),
+                    "aria-expanded": expanded.includes(group.key) === true,
+                    onClick: () => toggleExpand(group.key),
                     children: [
                       isCollapsed
                         ? jsx(P.IconChevronRightOutlineRegular, { key: "chevron" })
@@ -3241,15 +3249,6 @@ button.dse-qcName{cursor:pointer}
                                   ? t("qc.newCommand")
                                   : t("qc.editing", { name: draft.name.trim() === "" ? t("qc.untitled") : draft.name.trim() }),
                               }),
-                              editing === null
-                                ? null
-                                : jsx("span", {
-                                    className: "dse-qcLink",
-                                    type: "button",
-                                    "data-qc-cancel": true,
-                                    onClick: startNew,
-                                    children: t("qc.cancelEdit"),
-                                  }),
                             ],
                           }),
                           textField("name", t("qc.fieldName"), t("qc.namePlaceholder"), false),

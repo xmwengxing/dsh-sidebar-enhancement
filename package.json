@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-enhancement",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
   "description": "Enhanced Sidebar files panel: rename, create, upload, download, delete and copy-full-path; an editable document renderer with save; a bottom terminal panel with a quick-command library.",
   "license": "MIT",
