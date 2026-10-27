@@ -3438,7 +3438,11 @@ button.dse-qcName{cursor:pointer}
      * one is safe: the view survives and re-attachment starts from a complete
      * bounded screen).
      */
-    function PanelSeat({ ctx, sessionId, seat, t, themeHook, tTerm, helpersFor }) {
+    // Memoized so terminal-input frames and panel-chrome state changes
+    // (opening the quick-command dialog, dragging the grip, switching tabs)
+    // never re-render the live terminal subtree. Its props are all stable
+    // except `seat`, which only changes when the active seat actually changes.
+    const PanelSeat = React.memo(function PanelSeat({ ctx, sessionId, seat, t, themeHook, tTerm, helpersFor }) {
       const [attempt, setAttempt] = React.useState(1);
       const body = useTerminalChunk(attempt);
       const helpers = helpersFor(sessionId);
@@ -3491,7 +3495,7 @@ button.dse-qcName{cursor:pointer}
         tTerm,
         tab: fabricated,
       });
-    }
+    });
 
     /**
      * The panel body (composer-dock entry): a multi-tab terminal column owned
@@ -3501,6 +3505,11 @@ button.dse-qcName{cursor:pointer}
      * resizes the whole panel. No sidebar tab is ever touched.
      */
     function makeBottomTerminalPanel(ctx, themeHook, tTerm) {
+      // Bind `t` once so the memoized `PanelSeat` sees a stable `t` identity
+      // (the slot framework injects a fresh `t` per render, which would defeat
+      // the memo). `themeHook`/`tTerm`/`helpersOf` are stable too, so the only
+      // prop that can change is the active seat itself.
+      const tBound = ctx.locale.bind(NS);
       const helpersCache = new Map();
       const helpersOf = (sessionId) => {
         let helpers = helpersCache.get(sessionId);
@@ -3521,10 +3530,18 @@ button.dse-qcName{cursor:pointer}
         const activeKey = seats.some((seat) => seat.key === active)
           ? active
           : seats.length > 0 ? seats[seats.length - 1].key : undefined;
-        // Reconcile immediately: an effect would defer the switch until after
-        // this render, so the click's result appears on the very next paint.
-        if (activeKey !== undefined && activeKey !== panelStore.active) panelStore.setActive(activeKey);
         const activeSeat = seats.find((seat) => seat.key === activeKey);
+        // Reconcile outside render: a stale/corrected active key must point at a
+        // real seat. The previous code mutated the store during render, which
+        // both breaks the no-side-effects-in-render rule and forces an extra
+        // whole-panel re-render; an effect applies the same correction on the
+        // next commit without that cost. Click-driven switches already set the
+        // active key directly, so this only repairs stale values.
+        React.useEffect(() => {
+          if (activeKey !== undefined && activeKey !== panelStore.active) {
+            panelStore.setActive(activeKey);
+          }
+        }, [activeKey]);
 
         /**
          * Type a quick command into the terminal the panel is showing. The
@@ -3666,7 +3683,7 @@ button.dse-qcName{cursor:pointer}
                 ctx,
                 sessionId,
                 seat: activeSeat,
-                t,
+                t: tBound,
                 themeHook,
                 tTerm,
                 helpersFor: helpersOf,
